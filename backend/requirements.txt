@@ -1,0 +1,9 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+aiosqlite>=0.20.0
+sqlalchemy[asyncio]>=2.0.35
+python-dotenv>=1.0.1
+httpx>=0.28.0
+discord.py>=2.4.0
+websockets>=13.1

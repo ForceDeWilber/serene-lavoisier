@@ -1,0 +1,272 @@
+use crate::model::{EnvelopeBalance, Order, OrderSide, Symbol};
+use chrono::{DateTime, Duration, Utc};
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
+use tokio::sync::Mutex;
+use tracing::{error, warn};
+
+#[derive(Error, Debug)]
+pub enum RiskError {
+    #[error("Circuit breaker is tripped: {0}")]
+    CircuitBreakerTripped(String),
+    #[error("Capital envelope exhausted: required {required} {currency}, available {available} {currency}")]
+    EnvelopeExhausted {
+        currency: String,
+        required: Decimal,
+        available: Decimal,
+    },
+    #[error("Adverse selection triggered: rapid price dump detected ({pct_drop}% drop), buy orders blocked")]
+    AdverseSelectionBlocked { pct_drop: Decimal },
+    #[error("Rate limit exceeded: Revolut X token bucket is depleted")]
+    RateLimitDepleted,
+}
+
+/// Rolling window price sample for adverse selection detection
+#[derive(Debug, Clone)]
+struct PriceSample {
+    timestamp: DateTime<Utc>,
+    price: Decimal,
+}
+
+/// Detects sudden downward price velocity on Kraken to cancel toxic Revolut X bids
+#[derive(Debug)]
+pub struct AdverseSelectionLagFilter {
+    samples: VecDeque<PriceSample>,
+    window_duration: Duration,
+    max_drop_threshold_pct: Decimal, // e.g. 0.006 = 0.6%
+}
+
+impl AdverseSelectionLagFilter {
+    pub fn new(window_seconds: i64, max_drop_threshold_pct: Decimal) -> Self {
+        Self {
+            samples: VecDeque::new(),
+            window_duration: Duration::seconds(window_seconds),
+            max_drop_threshold_pct,
+        }
+    }
+
+    pub fn record_price(&mut self, price: Decimal, now: DateTime<Utc>) -> bool {
+        self.samples.push_back(PriceSample { timestamp: now, price });
+
+        // Evict expired samples
+        let cutoff = now - self.window_duration;
+        while let Some(front) = self.samples.front() {
+            if front.timestamp < cutoff {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Check if there is an adverse rapid dump from the recent peak in window
+        if let Some(peak) = self.samples.iter().map(|s| s.price).max() {
+            if peak > Decimal::ZERO {
+                let drop_pct = (peak - price) / peak;
+                if drop_pct >= self.max_drop_threshold_pct {
+                    warn!(
+                        "Adverse selection trigger: price dropped {:.3}% (peak: {}, current: {}) within {}s",
+                        drop_pct * dec!(100),
+                        peak,
+                        price,
+                        self.window_duration.num_seconds()
+                    );
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Rolling 2-hour window circuit breaker monitoring portfolio drawdown
+#[derive(Debug)]
+pub struct CircuitBreaker {
+    tripped: Arc<AtomicBool>,
+    max_drawdown_pct: Decimal, // e.g. 0.05 = 5.0%
+    peak_equity: Decimal,
+    last_reset: DateTime<Utc>,
+}
+
+impl CircuitBreaker {
+    pub fn new(max_drawdown_pct: Decimal) -> Self {
+        Self {
+            tripped: Arc::new(AtomicBool::new(false)),
+            max_drawdown_pct,
+            peak_equity: Decimal::ZERO,
+            last_reset: Utc::now(),
+        }
+    }
+
+    pub fn is_tripped(&self) -> bool {
+        self.tripped.load(Ordering::SeqCst)
+    }
+
+    pub fn trip(&self, reason: &str) {
+        self.tripped.store(true, Ordering::SeqCst);
+        error!("CRITICAL: Global circuit breaker tripped! Reason: {}", reason);
+    }
+
+    pub fn reset(&mut self, initial_equity: Decimal) {
+        self.peak_equity = initial_equity;
+        self.tripped.store(false, Ordering::SeqCst);
+        self.last_reset = Utc::now();
+    }
+
+    pub fn update_equity(&mut self, current_equity: Decimal, now: DateTime<Utc>) -> bool {
+        if self.is_tripped() {
+            return true;
+        }
+
+        // Reset peak every 2 hours
+        if now - self.last_reset > Duration::hours(2) {
+            self.peak_equity = current_equity;
+            self.last_reset = now;
+            return false;
+        }
+
+        if current_equity > self.peak_equity {
+            self.peak_equity = current_equity;
+            return false;
+        }
+
+        if self.peak_equity > Decimal::ZERO {
+            let drawdown = (self.peak_equity - current_equity) / self.peak_equity;
+            if drawdown >= self.max_drawdown_pct {
+                self.trip(&format!(
+                    "Portfolio drawdown of {:.2}% exceeded max threshold of {:.2}% (Peak: {}, Current: {})",
+                    drawdown * dec!(100),
+                    self.max_drawdown_pct * dec!(100),
+                    self.peak_equity,
+                    current_equity
+                ));
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Central Risk Engine orchestrating envelopes, circuit breakers, and adverse selection
+pub struct CentralRiskEngine {
+    circuit_breaker: Mutex<CircuitBreaker>,
+    envelopes: Mutex<HashMap<String, EnvelopeBalance>>, // key: "{runner_id}:{currency}"
+    lag_filters: Mutex<HashMap<String, AdverseSelectionLagFilter>>, // key: symbol.as_slash()
+    max_drawdown_pct: Decimal,
+    lag_drop_threshold_pct: Decimal,
+}
+
+impl CentralRiskEngine {
+    pub fn new(max_drawdown_pct: Decimal, lag_drop_threshold_pct: Decimal) -> Self {
+        Self {
+            circuit_breaker: Mutex::new(CircuitBreaker::new(max_drawdown_pct)),
+            envelopes: Mutex::new(HashMap::new()),
+            lag_filters: Mutex::new(HashMap::new()),
+            max_drawdown_pct,
+            lag_drop_threshold_pct,
+        }
+    }
+
+    pub fn max_drawdown_pct(&self) -> Decimal {
+        self.max_drawdown_pct
+    }
+
+    pub fn lag_drop_threshold_pct(&self) -> Decimal {
+        self.lag_drop_threshold_pct
+    }
+
+    pub async fn register_envelope(&self, runner_id: &str, currency: &str, amount: Decimal) {
+        let mut map = self.envelopes.lock().await;
+        let key = format!("{}:{}", runner_id, currency.to_uppercase());
+        map.insert(key, EnvelopeBalance::new(runner_id, currency, amount));
+    }
+
+    pub async fn get_envelope(&self, runner_id: &str, currency: &str) -> Option<EnvelopeBalance> {
+        let map = self.envelopes.lock().await;
+        let key = format!("{}:{}", runner_id, currency.to_uppercase());
+        map.get(&key).cloned()
+    }
+
+    pub async fn record_kraken_tick(&self, symbol: &Symbol, price: Decimal, now: DateTime<Utc>) -> bool {
+        let mut filters = self.lag_filters.lock().await;
+        let filter = filters.entry(symbol.as_slash()).or_insert_with(|| {
+            AdverseSelectionLagFilter::new(60, self.lag_drop_threshold_pct)
+        });
+        filter.record_price(price, now)
+    }
+
+    /// Validates an order intent before execution
+    pub async fn validate_order(&self, order: &Order) -> Result<(), RiskError> {
+        // 1. Check Circuit Breaker
+        let cb = self.circuit_breaker.lock().await;
+        if cb.is_tripped() {
+            return Err(RiskError::CircuitBreakerTripped(
+                "Global circuit breaker is active. All order placement is halted.".into(),
+            ));
+        }
+        drop(cb);
+
+        // 2. Check Capital Envelope
+        let required_currency = match order.side {
+            OrderSide::Buy => &order.symbol.quote,
+            OrderSide::Sell => &order.symbol.base,
+        };
+        let required_amount = match order.side {
+            OrderSide::Buy => order.price * order.qty,
+            OrderSide::Sell => order.qty,
+        };
+
+        let mut envelopes = self.envelopes.lock().await;
+        let key = format!("{}:{}", order.runner_id, required_currency);
+        let envelope = envelopes.get_mut(&key).ok_or_else(|| RiskError::EnvelopeExhausted {
+            currency: required_currency.clone(),
+            required: required_amount,
+            available: Decimal::ZERO,
+        })?;
+
+        if envelope.available < required_amount {
+            return Err(RiskError::EnvelopeExhausted {
+                currency: required_currency.clone(),
+                required: required_amount,
+                available: envelope.available,
+            });
+        }
+
+        // Reserve the capital
+        envelope.lock(required_amount).map_err(|_| RiskError::EnvelopeExhausted {
+            currency: required_currency.clone(),
+            required: required_amount,
+            available: envelope.available,
+        })?;
+
+        Ok(())
+    }
+
+    pub async fn release_order_capital(&self, order: &Order) {
+        let currency = match order.side {
+            OrderSide::Buy => &order.symbol.quote,
+            OrderSide::Sell => &order.symbol.base,
+        };
+        let amount = match order.side {
+            OrderSide::Buy => order.price * order.remaining_qty(),
+            OrderSide::Sell => order.remaining_qty(),
+        };
+
+        let mut envelopes = self.envelopes.lock().await;
+        let key = format!("{}:{}", order.runner_id, currency);
+        if let Some(env) = envelopes.get_mut(&key) {
+            env.unlock(amount);
+        }
+    }
+
+    pub async fn is_circuit_breaker_tripped(&self) -> bool {
+        self.circuit_breaker.lock().await.is_tripped()
+    }
+
+    pub async fn trip_circuit_breaker(&self, reason: &str) {
+        self.circuit_breaker.lock().await.trip(reason);
+    }
+}

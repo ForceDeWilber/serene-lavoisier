@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/trading-core",
+    "crates/kraken-client",
+    "crates/revolut-client",
+    "crates/engine-daemon",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["William"]
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1.43", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["connect", "handshake", "native-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "http2", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rust_decimal = { version = "1.36", features = ["serde", "maths"] }
+rust_decimal_macros = "1.36"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.13", features = ["v4", "serde"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+base64 = "0.22"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+thiserror = "2.0"
+anyhow = "1.0"
+async-trait = "0.1"
+dotenvy = "0.15"

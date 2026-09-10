@@ -1,0 +1,36 @@
+# Caddyfile: Production reverse proxy configuration with automatic TLS (Let's Encrypt / ZeroSSL)
+# Set your public domain or DuckDNS subdomain below (e.g., engine.yourdomain.com or trader.duckdns.org)
+# In local or testing environments, localhost will use self-signed TLS.
+
+{$ENGINE_DOMAIN:localhost} {
+    # Reverse proxy to the local FastAPI control plane
+    reverse_proxy 127.0.0.1:8000 {
+        # Streaming and WebSocket support is active by default in Caddy
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        # Keepalive buffer settings for low-latency streaming
+        transport http {
+            keepalive 120s
+            keepalive_idle_conns 100
+        }
+    }
+
+    # Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # Logging
+    log {
+        output file /var/log/caddy/trading-engine.log {
+            roll_size 20mb
+            roll_keep 5
+        }
+    }
+}

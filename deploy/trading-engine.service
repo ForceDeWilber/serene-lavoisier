@@ -1,0 +1,29 @@
+[Unit]
+Description=Serene Lavoisier Multi-Venue Trading Engine Control Plane
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/serene-lavoisier
+EnvironmentFile=/home/ubuntu/serene-lavoisier/.env
+Environment=PYTHONPATH=/home/ubuntu/serene-lavoisier/backend
+ExecStart=/home/ubuntu/serene-lavoisier/backend/.venv/bin/python backend/run.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-engine
+
+# Process Limits & Sandboxing
+LimitNOFILE=65536
+LimitNPROC=4096
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/serene-lavoisier /tmp
+
+[Install]
+WantedBy=multi-user.target

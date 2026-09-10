@@ -1,0 +1,16 @@
+/target/
+**/*.rs.bk
+*.pdb
+.env
+trading.db
+trading.db-journal
+*.log
+/tmp/trading_engine.sock
+.DS_Store
+node_modules/
+.next/
+dist/
+__pycache__/
+*.pyc
+.venv/
+*.pem
