@@ -1,15 +1,18 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 use trading_core::risk::CentralRiskEngine;
 use trading_core::runner::RunnerTuningUpdate;
 use trading_core::simulator::PaperExecutionSimulator;
+
+#[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerTelemetryDto {
@@ -82,18 +85,58 @@ impl IpcServer {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        let path = Path::new(&self.socket_path);
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-        }
-
-        let listener = UnixListener::bind(path)?;
-        info!("UDS IPC Server listening on unix:{}", self.socket_path);
-
         let risk = self.risk_engine.clone();
         let sim = self.simulator.clone();
         let btc_tx = self.btc_tune_tx.clone();
         let eth_tx = self.eth_tune_tx.clone();
+
+        #[cfg(unix)]
+        {
+            if !self.socket_path.contains(':') {
+                let path = Path::new(&self.socket_path);
+                if path.exists() {
+                    let _ = std::fs::remove_file(path);
+                }
+
+                let listener = UnixListener::bind(path)?;
+                info!("UDS IPC Server listening on unix:{}", self.socket_path);
+
+                tokio::spawn(async move {
+                    loop {
+                        match listener.accept().await {
+                            Ok((stream, _)) => {
+                                let r = risk.clone();
+                                let s = sim.clone();
+                                let b = btc_tx.clone();
+                                let e = eth_tx.clone();
+                                tokio::spawn(async move {
+                                    let (reader, writer) = stream.into_split();
+                                    if let Err(err) = Self::handle_stream(reader, writer, r, s, b, e).await {
+                                        error!("UDS Client error: {}", err);
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                error!("UDS accept failed: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                });
+
+                return Ok(());
+            }
+        }
+
+        // TCP fallback (Windows or explicit host:port)
+        let addr = if self.socket_path.contains(':') {
+            self.socket_path.clone()
+        } else {
+            "127.0.0.1:9099".to_string()
+        };
+
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        info!("TCP IPC Server listening on {}", addr);
 
         tokio::spawn(async move {
             loop {
@@ -104,13 +147,14 @@ impl IpcServer {
                         let b = btc_tx.clone();
                         let e = eth_tx.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = Self::handle_client(stream, r, s, b, e).await {
-                                error!("UDS Client error: {}", err);
+                            let (reader, writer) = stream.into_split();
+                            if let Err(err) = Self::handle_stream(reader, writer, r, s, b, e).await {
+                                error!("TCP IPC Client error: {}", err);
                             }
                         });
                     }
                     Err(e) => {
-                        error!("UDS accept failed: {}", e);
+                        error!("TCP IPC accept failed: {}", e);
                         break;
                     }
                 }
@@ -120,14 +164,18 @@ impl IpcServer {
         Ok(())
     }
 
-    async fn handle_client(
-        stream: UnixStream,
+    async fn handle_stream<R, W>(
+        reader: R,
+        mut writer: W,
         risk: Arc<CentralRiskEngine>,
         sim: Arc<PaperExecutionSimulator>,
         btc_tx: watch::Sender<RunnerTuningUpdate>,
         eth_tx: watch::Sender<RunnerTuningUpdate>,
-    ) -> anyhow::Result<()> {
-        let (reader, mut writer) = stream.into_split();
+    ) -> anyhow::Result<()>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
         let mut buf_reader = BufReader::new(reader);
         let mut line = String::new();
 

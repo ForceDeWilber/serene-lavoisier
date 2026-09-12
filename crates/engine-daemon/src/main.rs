@@ -26,10 +26,23 @@ async fn main() -> anyhow::Result<()> {
 
     dotenv().ok();
 
+    let trading_mode = std::env::var("TRADING_MODE").unwrap_or_else(|_| "PAPER".into()).to_uppercase();
+
     info!("============================================================");
     info!("Starting Multi-Venue Algorithmic Crypto Trading System (UK)");
     info!("Asymmetric Venue Model: Revolut X (0% Maker) + Kraken Pro WS");
-    info!("Execution Mode: PAPER TRADING (Virtual Simulator)");
+    if trading_mode == "LIVE" {
+        info!("Execution Mode: 🔴 LIVE REAL CAPITAL (Revolut X HTTP/2)");
+        let api_key = std::env::var("REVOLUT_API_KEY").unwrap_or_default();
+        let priv_path = std::env::var("REVOLUT_PRIVATE_KEY_PATH").unwrap_or_else(|_| "backend/credentials/revolut_private.pem".into());
+        if api_key.is_empty() || !std::path::Path::new(&priv_path).exists() {
+            tracing::error!("FATAL: TRADING_MODE=LIVE requested, but REVOLUT_API_KEY or revolut_private.pem is missing!");
+            tracing::error!("Refusing to run live execution without valid credentials.");
+            std::process::exit(1);
+        }
+    } else {
+        info!("Execution Mode: 🧪 PAPER TRADING (Virtual Simulator)");
+    }
     info!("============================================================");
 
     // 2. Risk Engine & Capital Envelopes
@@ -109,8 +122,13 @@ async fn main() -> anyhow::Result<()> {
         eth_tune_rx,
     );
 
-    // 7. Unix Domain Socket IPC Server
-    let socket_path = std::env::var("ENGINE_UDS_PATH").unwrap_or_else(|_| "/tmp/trading_engine.sock".into());
+    // 7. IPC Server (Unix Domain Socket on Unix, TCP on Windows)
+    let default_sock = if cfg!(windows) {
+        "127.0.0.1:9099".to_string()
+    } else {
+        "/tmp/trading_engine.sock".to_string()
+    };
+    let socket_path = std::env::var("ENGINE_UDS_PATH").unwrap_or(default_sock);
     let ipc_server = IpcServer::new(
         socket_path,
         risk_engine.clone(),
@@ -120,36 +138,42 @@ async fn main() -> anyhow::Result<()> {
     );
     ipc_server.run().await?;
 
-    // Spawn runners
-    tokio::spawn(async move {
-        btc_runner.run().await;
-    });
+    let is_live = trading_mode == "LIVE";
+    if !is_live {
+        // Spawn paper sandbox runners
+        tokio::spawn(async move {
+            btc_runner.run().await;
+        });
 
-    tokio::spawn(async move {
-        eth_runner.run().await;
-    });
+        tokio::spawn(async move {
+            eth_runner.run().await;
+        });
 
-    // 8. Telemetry Heartbeat Logger
-    let sim_telemetry = simulator.clone();
-    let risk_telemetry = risk_engine.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-            let wallet = sim_telemetry.get_wallet().await;
-            let resting = sim_telemetry.get_resting_orders().await;
-            let cb_tripped = risk_telemetry.is_circuit_breaker_tripped().await;
+        // 8. Telemetry Heartbeat Logger for Paper Simulator
+        let sim_telemetry = simulator.clone();
+        let risk_telemetry = risk_engine.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                let wallet = sim_telemetry.get_wallet().await;
+                let resting = sim_telemetry.get_resting_orders().await;
+                let cb_tripped = risk_telemetry.is_circuit_breaker_tripped().await;
 
-            info!(
-                "[TELEMETRY] Balances: [GBP: £{:.2}, BTC: {:.6}, ETH: {:.6}] | Active Resting Orders: {} | Circuit Breaker: {}",
-                wallet.gbp,
-                wallet.btc,
-                wallet.eth,
-                resting.len(),
-                if cb_tripped { "TRIPPED" } else { "NORMAL" }
-            );
-        }
-    });
+                info!(
+                    "[PAPER-TELEMETRY] Balances: [GBP: £{:.2}, BTC: {:.6}, ETH: {:.6}] | Active Resting Orders: {} | Circuit Breaker: {}",
+                    wallet.gbp,
+                    wallet.btc,
+                    wallet.eth,
+                    resting.len(),
+                    if cb_tripped { "TRIPPED" } else { "NORMAL" }
+                );
+            }
+        });
+    } else {
+        info!("🔴 [LIVE PRODUCTION] In-memory Paper Simulator disabled. Live order execution is managed directly via Revolut X HTTP/2 Live Trading Runner.");
+        info!("📡 [MARKET DATA] Kraken WS v2 Oracle stream active for real-time BTC/GBP & ETH/GBP feeds.");
+    }
 
     // 8. Wait for termination signal
     tokio::signal::ctrl_c().await?;

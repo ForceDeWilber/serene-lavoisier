@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import sys
 from typing import Any, Dict, Optional
 from app.config import ENGINE_UDS_PATH
 
@@ -12,7 +13,17 @@ class EngineIpcClient:
 
     async def _send_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            reader, writer = await asyncio.open_unix_connection(self.socket_path)
+            if hasattr(asyncio, "open_unix_connection") and not (":" in self.socket_path or sys.platform == "win32"):
+                reader, writer = await asyncio.open_unix_connection(self.socket_path)
+            else:
+                host = "127.0.0.1"
+                port = 9099
+                if ":" in self.socket_path:
+                    parts = self.socket_path.split(":")
+                    host = parts[0]
+                    port = int(parts[1])
+                reader, writer = await asyncio.open_connection(host, port)
+
             message = json.dumps(payload) + "\n"
             writer.write(message.encode("utf-8"))
             await writer.drain()

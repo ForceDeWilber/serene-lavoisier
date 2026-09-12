@@ -102,9 +102,9 @@ class CapitalManager:
             signature_b64 = base64.b64encode(signature_bytes).decode("utf-8")
 
             headers = {
-                "Revx-Key": api_key,
-                "Revx-Timestamp": timestamp,
-                "Revx-Signature": signature_b64,
+                "X-Revx-API-Key": api_key,
+                "X-Revx-Timestamp": timestamp,
+                "X-Revx-Signature": signature_b64,
                 "Accept": "application/json",
             }
 

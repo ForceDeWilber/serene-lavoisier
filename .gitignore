@@ -2,8 +2,8 @@
 **/*.rs.bk
 *.pdb
 .env
-trading.db
-trading.db-journal
+trading*.db
+trading*.db-journal
 *.log
 /tmp/trading_engine.sock
 .DS_Store
@@ -14,3 +14,6 @@ __pycache__/
 *.pyc
 .venv/
 *.pem
+logs/
+.pids.json
+backend/credentials/

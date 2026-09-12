@@ -19,11 +19,19 @@ async function forwardRequest(
       }
     }
 
-    // 2. Resolve destination URL
+    // 2. Resolve destination URL & Host Isolation
     const { path } = await context.params;
     const subPath = path.join("/");
-    const engineUrl = (process.env.ENGINE_URL || "http://localhost:8000").replace(/\/$/, "");
     const search = req.nextUrl.search;
+    const mode = req.nextUrl.searchParams.get("mode")?.toLowerCase();
+
+    const isLive = mode === "live" || subPath.startsWith("live");
+    const liveUrl = process.env.LIVE_ENGINE_URL;
+    const paperUrl = process.env.PAPER_ENGINE_URL;
+    const defaultUrl = process.env.ENGINE_URL || "http://localhost:8000";
+
+    // Host isolation: live routes to dedicated live VM; paper/backtest routes to sandbox host
+    const engineUrl = (isLive ? (liveUrl || defaultUrl) : (paperUrl || defaultUrl)).replace(/\/$/, "");
     const targetUrl = `${engineUrl}/api/${subPath}${search}`;
 
     // 3. Prepare headers
@@ -37,7 +45,9 @@ async function forwardRequest(
     }
 
     // Securely inject engine secret on server-side
-    const engineSecret = process.env.ENGINE_SECRET_KEY;
+    const engineSecret = isLive
+      ? (process.env.LIVE_ENGINE_SECRET_KEY || process.env.ENGINE_SECRET_KEY)
+      : (process.env.PAPER_ENGINE_SECRET_KEY || process.env.ENGINE_SECRET_KEY);
     if (engineSecret) {
       headers["X-Engine-Secret"] = engineSecret;
     }
@@ -56,8 +66,18 @@ async function forwardRequest(
       }
     }
 
-    // 5. Fetch from Lightsail trading engine
-    const backendRes = await fetch(targetUrl, init);
+    // 5. Fetch from trading engine (with local fallback if remote host unreachable)
+    let backendRes: Response;
+    try {
+      backendRes = await fetch(targetUrl, init);
+    } catch (fetchErr: any) {
+      if (isLive && liveUrl && defaultUrl && liveUrl !== defaultUrl) {
+        const fallbackTarget = `${defaultUrl.replace(/\/$/, "")}/api/${subPath}${search}`;
+        backendRes = await fetch(fallbackTarget, init);
+      } else {
+        throw fetchErr;
+      }
+    }
 
     const data = await backendRes.text();
     let parsedData;

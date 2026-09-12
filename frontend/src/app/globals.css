@@ -3,13 +3,36 @@
 @tailwind utilities;
 
 :root {
-  --foreground: #f8fafc;
-  --background: #090d16;
+  --background: #0d1117;
+  --foreground: #e6edf3;
+  --nordic-card: #161b22;
+  --nordic-border: #30363d;
+  --nordic-accent: #58a6ff;
+  --nordic-green: #3fb950;
+  --nordic-red: #f85149;
+  --nordic-amber: #d29922;
 }
 
 body {
   color: var(--foreground);
   background: var(--background);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+::-webkit-scrollbar-thumb {
+  background: #21262d;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #30363d;
 }

@@ -8,6 +8,7 @@ use reqwest::{header, Client};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use signer::Ed25519Signer;
+use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{error, info};
 use trading_core::model::Order;
@@ -89,9 +90,9 @@ impl RevolutExecutionClient for LiveRevolutClient {
         let resp = self
             .client
             .post(&url)
-            .header("Revx-Key", self.signer.api_key())
-            .header("Revx-Timestamp", timestamp.to_string())
-            .header("Revx-Signature", signature)
+            .header("X-Revx-API-Key", self.signer.api_key())
+            .header("X-Revx-Timestamp", timestamp.to_string())
+            .header("X-Revx-Signature", signature)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body_str)
             .send()
@@ -120,9 +121,9 @@ impl RevolutExecutionClient for LiveRevolutClient {
         let resp = self
             .client
             .delete(&url)
-            .header("Revx-Key", self.signer.api_key())
-            .header("Revx-Timestamp", timestamp.to_string())
-            .header("Revx-Signature", signature)
+            .header("X-Revx-API-Key", self.signer.api_key())
+            .header("X-Revx-Timestamp", timestamp.to_string())
+            .header("X-Revx-Signature", signature)
             .send()
             .await
             .map_err(|e| format!("HTTP cancel request error: {}", e))?;
@@ -137,29 +138,45 @@ impl RevolutExecutionClient for LiveRevolutClient {
         Ok(())
     }
 
-    async fn get_balance(&self, _currency: &str) -> Result<Decimal, String> {
+    async fn get_balance(&self, currency: &str) -> Result<Decimal, String> {
         self.rate_limiter.acquire().await;
 
         let timestamp = Utc::now().timestamp_millis();
-        let path = "/api/v1/balances";
+        let path = "/api/1.0/balances";
         let signature = self.signer.sign_payload(timestamp, "GET", path, "");
 
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .client
             .get(&url)
-            .header("Revx-Key", self.signer.api_key())
-            .header("Revx-Timestamp", timestamp.to_string())
-            .header("Revx-Signature", signature)
+            .header("X-Revx-API-Key", self.signer.api_key())
+            .header("X-Revx-Timestamp", timestamp.to_string())
+            .header("X-Revx-Signature", signature)
             .send()
             .await
             .map_err(|e| format!("HTTP balance request error: {}", e))?;
 
         if !resp.status().is_success() {
-            return Err(format!("Revolut X balance fetch failed: {}", resp.status()));
+            return Err(format!("Revolut X balance fetch failed [HTTP {}]", resp.status()));
         }
 
-        // Parse balances array
+        #[derive(Deserialize)]
+        struct BalanceEntry {
+            currency: String,
+            #[serde(default)]
+            available: Option<String>,
+        }
+
+        let entries: Vec<BalanceEntry> = resp.json().await.map_err(|e| format!("Failed to parse balances JSON: {}", e))?;
+        for entry in entries {
+            if entry.currency.eq_ignore_ascii_case(currency) {
+                if let Some(avail_str) = entry.available {
+                    return Decimal::from_str(&avail_str).map_err(|e| e.to_string());
+                }
+            }
+        }
+
+        // Return Decimal::ZERO if currency is not present in account list
         Ok(Decimal::ZERO)
     }
 }

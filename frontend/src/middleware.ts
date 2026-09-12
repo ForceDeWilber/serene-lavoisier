@@ -21,14 +21,19 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Only gate /dashboard
-  if (pathname.startsWith("/dashboard")) {
+  // Gate /, /dashboard, /paper, and /live
+  if (
+    pathname === "/" ||
+    pathname.startsWith("/dashboard") ||
+    pathname.startsWith("/paper") ||
+    pathname.startsWith("/live")
+  ) {
     const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
     const isValid = await verifySessionToken(token);
 
     if (!isValid) {
       const loginUrl = new URL("/login", request.url);
-      loginUrl.searchParams.set("returnUrl", pathname);
+      loginUrl.searchParams.set("returnUrl", pathname === "/" ? "/dashboard" : pathname);
       return NextResponse.redirect(loginUrl);
     }
   }
@@ -37,5 +42,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/login"],
+  matcher: ["/dashboard/:path*", "/paper", "/live", "/login"],
 };

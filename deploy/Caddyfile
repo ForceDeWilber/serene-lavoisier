@@ -1,11 +1,11 @@
-# Caddyfile: Production reverse proxy configuration with automatic TLS (Let's Encrypt / ZeroSSL)
-# Set your public domain or DuckDNS subdomain below (e.g., engine.yourdomain.com or trader.duckdns.org)
-# In local or testing environments, localhost will use self-signed TLS.
+# Caddyfile: Multi-Domain Reverse Proxy with Automatic TLS
+# Primary domains:
+# - trader.wilbergoose.com: Next.js Trading Dashboard
+# - engine.wilbergoose.com: Dedicated AWS Lightsail eu-west-2 Live Production Engine
 
-{$ENGINE_DOMAIN:localhost} {
-    # Reverse proxy to the local FastAPI control plane
+{$LIVE_ENGINE_DOMAIN:engine.wilbergoose.com} {
+    # Reverse proxy to the local FastAPI control plane (TRADING_MODE=LIVE)
     reverse_proxy 127.0.0.1:8000 {
-        # Streaming and WebSocket support is active by default in Caddy
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
@@ -28,9 +28,26 @@
 
     # Logging
     log {
-        output file /var/log/caddy/trading-engine.log {
+        output file /var/log/caddy/live-trading-engine.log {
             roll_size 20mb
             roll_keep 5
         }
+    }
+}
+
+# Unified Dashboard Domain (if running frontend on Lightsail)
+{$DASHBOARD_DOMAIN:trader.wilbergoose.com} {
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8000
+    }
+    handle {
+        reverse_proxy 127.0.0.1:3000
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
     }
 }

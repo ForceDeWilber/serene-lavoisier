@@ -1,20 +1,48 @@
-# AWS Lightsail & Vercel Deployment Guide
+# AWS Lightsail & Domain Deployment Guide: trader.wilbergoose.com
 
-This guide provides step-by-step instructions for deploying the **Trading Engine on AWS Lightsail (`eu-west-2` London)** and the **Production Dashboard on Vercel**.
+This guide provides step-by-step instructions for deploying the **Dedicated Live Production Engine on AWS Lightsail (`eu-west-2` London)** and the **Web Dashboard on `trader.wilbergoose.com`** with complete host and workload isolation.
 
 ---
 
-## Architecture Overview
+## Architecture & Workload Isolation
 
-- **AWS Lightsail (`eu-west-2` London)**:
-  - Runs the low-latency Python/FastAPI control plane & Rust execution core.
+```
+                                https://trader.wilbergoose.com
+                                   (Vercel or Reverse Proxy)
+                                               │
+                      ┌────────────────────────┴────────────────────────┐
+                      ▼                                                 ▼
+             mode=paper / /paper                               mode=live / /live
+        [🧪 PAPER STRATEGY SANDBOX]                       [🔴 LIVE REAL CAPITAL TERMINAL]
+                      │                                                 │
+                      ▼                                                 ▼
+          Next.js BFF Proxy                                 Next.js BFF Proxy
+                      │                                                 │
+                      │ (PAPER_ENGINE_URL)                              │ (LIVE_ENGINE_URL)
+                      ▼                                                 ▼
+      ┌───────────────────────────────┐                 ┌───────────────────────────────┐
+      │     Sandbox / Paper Host      │                 │    Dedicated Live Host (AWS)  │
+      │  (Separate VM / Local / Dev)  │                 │    Lightsail eu-west-2 London │
+      ├───────────────────────────────┤                 ├───────────────────────────────┤
+      │ • Historical Candle Downloads │                 │ • ZERO Historical Downloads   │
+      │ • Heavy Backtest Simulations  │                 │ • Sub-2ms Revolut X HTTP/2    │
+      │ • In-memory Paper Simulator   │                 │ • Sub-9ms Kraken WS v2 Feeds  │
+      │ • Strategy R&D Playground     │                 │ • Real Ed25519 Order Signing  │
+      │                               │                 │ • Real Post-Only Limit Orders │
+      │                               │                 │ • Strict No-£0 Fallback Rule  │
+      └───────────────────────────────┘                 └───────────────────────────────┘
+```
+
+- **Dedicated Live Engine (`engine.wilbergoose.com` on AWS Lightsail `eu-west-2` London)**:
   - Sits $\approx 1 - 2\text{ ms}$ away from Revolut's London infrastructure and $\approx 9\text{ ms}$ from Kraken's Dublin infrastructure.
+  - Runs with `TRADING_MODE=LIVE`. Backtesting and historical candle downloads are **strictly disabled** on this host to guarantee zero CPU/socket contention for live snipes.
   - Holds `revolut_private.pem` securely on local disk (`chmod 600`).
   - Protected behind Caddy (automatic Let's Encrypt TLS) and an internal `X-Engine-Secret` token.
-  - Direct port 8000 is closed to the outside world; only HTTPS (port 443) is open.
-- **Vercel (Next.js Dashboard)**:
-  - Gated behind a Master Access PIN with an encrypted session cookie.
-  - Server-side BFF proxy (`/api/proxy/*`) securely injects the `ENGINE_SECRET_KEY` on the server so it is never exposed in client JavaScript.
+  - Strict Live Rule: Never falls back to a £10 or £0 paper wallet. Refuses to trade if unauthenticated or balance is £0.00.
+- **Web Dashboard (`trader.wilbergoose.com` on Vercel or Lightsail)**:
+  - Gated behind a Master Access PIN with encrypted session cookies.
+  - Server-side BFF proxy (`/api/proxy/*`) securely injects the `ENGINE_SECRET_KEY` on the server.
+  - Dynamically routes Live requests to `LIVE_ENGINE_URL` and Paper/Backtest requests to `PAPER_ENGINE_URL`.
 
 ---
 
@@ -26,30 +54,34 @@ This guide provides step-by-step instructions for deploying the **Trading Engine
 3. Select **Region & Zone**: **London (`eu-west-2`)**.
 4. Select Platform: **Linux/Unix**.
 5. Select Blueprint: **OS Only $\to$ Ubuntu 22.04 LTS or 24.04 LTS**.
-6. Choose Instance Plan: **\$5.00 / month (1 GB RAM, 1 vCPU, 40 GB SSD, 1 TB transfer)** or **\$10.00 / month (2 GB RAM)**.
+6. Choose Instance Plan: **\$5.00 / month (1 GB RAM, 1 vCPU)** or **\$10.00 / month (2 GB RAM)**.
 7. Name your instance (e.g., `trading-engine-london`) and click **Create instance**.
 
 ### 2. Attach a Static IP & Open Ports
 1. In Lightsail, go to the **Networking** tab.
 2. Click **Create static IP**, attach it to your new instance, and note the public IP (e.g., `52.56.x.x`).
-3. Under the instance's **Networking $\to$ IPv4 Firewall**, ensure only:
+3. Under IPv4 Firewall, ensure only:
    - **SSH (Port 22)**
    - **HTTP (Port 80)**
    - **HTTPS (Port 443)**
-   are open. **Do NOT open port 8000.**
+   are open. **Do NOT open port 8000 to the public.**
 
-### 3. Point a Domain or Free Subdomain
-- Point a domain or subdomain (e.g. `engine.yourdomain.com` or a free [DuckDNS](https://www.duckdns.org/) subdomain `mytrader.duckdns.org`) A-record to your Lightsail Static IP.
+### 3. Point DNS Records
+In your DNS provider (e.g., Cloudflare, Route53, Namecheap for `wilbergoose.com`):
+- Create an **A record**: `engine.wilbergoose.com` $\to$ Lightsail Static IP.
+- If running the dashboard on Vercel:
+  - Point `trader.wilbergoose.com` CNAME to `cname.vercel-dns.com`.
+- If running the dashboard directly on Lightsail:
+  - Point `trader.wilbergoose.com` A record to your Lightsail Static IP.
 
-### 4. Run the Automated Provisioning Script
-Connect to your Lightsail instance via SSH (using the Lightsail browser console or your local terminal):
-
+### 4. Run Automated Provisioning Script
+SSH into your Lightsail instance:
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/your-repo.git ~/serene-lavoisier
+git clone https://github.com/your-username/serene-lavoisier.git ~/serene-lavoisier
 cd ~/serene-lavoisier
 
-# Run the setup script
+# Run setup
 bash deploy/lightsail_setup.sh
 ```
 
@@ -58,24 +90,18 @@ bash deploy/lightsail_setup.sh
    ```bash
    chmod 600 ~/serene-lavoisier/backend/credentials/revolut_private.pem
    ```
-2. Edit `~/serene-lavoisier/.env` with your Revolut API Key and public domain:
+2. Edit `~/serene-lavoisier/.env`:
    ```bash
    nano ~/serene-lavoisier/.env
    ```
    Set:
    ```env
-   REVOLUT_API_KEY=0fEG...your-64-char-key...
+   TRADING_MODE=LIVE
+   REVOLUT_API_KEY=0fEG_your_revolut_api_key_here
    REVOLUT_PRIVATE_KEY_PATH=backend/credentials/revolut_private.pem
-   TRADING_MODE=PAPER  # Change to LIVE when ready
-   ENGINE_DOMAIN=engine.yourdomain.com
+   ENGINE_SECRET_KEY=generate_a_secure_64_character_hex_secret
    ```
-3. Update Caddy with your domain in `/etc/caddy/Caddyfile`:
-   ```caddyfile
-   engine.yourdomain.com {
-       reverse_proxy 127.0.0.1:8000
-   }
-   ```
-   Reload Caddy:
+3. Restart Caddy and the engine service:
    ```bash
    sudo systemctl restart caddy
    sudo systemctl restart trading-engine
@@ -83,66 +109,40 @@ bash deploy/lightsail_setup.sh
 
 ---
 
-## Part 2: Vercel Setup (Next.js Production Dashboard)
+## Part 2: Dashboard Configuration for `trader.wilbergoose.com`
 
-### 1. Import Repository into Vercel
-1. Go to [Vercel Dashboard](https://vercel.com/) and click **Add New $\to$ Project**.
-2. Select your repository.
-3. In **Root Directory**, select `frontend`.
-
-### 2. Configure Environment Variables in Vercel
-In the Vercel project deployment settings, add the following Environment Variables:
+### If Deploying on Vercel:
+In your Vercel Project Settings $\to$ Environment Variables:
 
 | Variable | Value | Purpose |
 | :--- | :--- | :--- |
-| `ENGINE_URL` | `https://engine.yourdomain.com` | Public HTTPS endpoint of your Lightsail engine |
-| `ENGINE_SECRET_KEY` | *(Value of `ENGINE_SECRET_KEY` from Lightsail `.env`)* | Authenticates Vercel server proxy calls to Lightsail |
-| `DASHBOARD_PIN` | `1234` *(Choose your secure 4–8 digit PIN)* | Master PIN required to unlock the web terminal |
-| `NEXT_PUBLIC_ENGINE_WS_URL` | `wss://engine.yourdomain.com/api/ws/stream?token=YOUR_SECRET` | (Optional) Direct WSS stream if using direct WebSockets |
+| `LIVE_ENGINE_URL` | `https://engine.wilbergoose.com` | Dedicated AWS Lightsail London live engine |
+| `PAPER_ENGINE_URL` | `https://sandbox.wilbergoose.com` *(or engine url)* | Sandbox / backtesting engine |
+| `ENGINE_URL` | `https://engine.wilbergoose.com` | Fallback engine URL |
+| `ENGINE_SECRET_KEY` | *(Same secret key as in Lightsail `.env`)* | Authenticates BFF proxy calls |
+| `DASHBOARD_PIN` | `1234` *(Choose your secure 4–8 digit PIN)* | Master access PIN for dashboard |
 
-### 3. Deploy
-Click **Deploy**. 
-
----
-
-## Part 3: Operational Verification Checklist
-
-1. **Verify Lightsail Engine Health**:
-   ```bash
-   curl -i https://engine.yourdomain.com/api/health
-   # Expected: HTTP 200 OK {"status":"healthy", ...}
-   ```
-2. **Verify Engine Rejects Unauthenticated Access**:
-   ```bash
-   curl -i https://engine.yourdomain.com/api/telemetry
-   # Expected: HTTP 401 Unauthorized
-   ```
-3. **Verify Authenticated Engine Access**:
-   ```bash
-   curl -i -H "X-Engine-Secret: YOUR_SECRET" https://engine.yourdomain.com/api/telemetry
-   # Expected: HTTP 200 OK with live telemetry payload
-   ```
-4. **Verify Vercel Production Dashboard**:
-   - Open `https://your-project.vercel.app/dashboard`.
-   - You will be greeted by the **Trading Desk Gate** PIN screen.
-   - Enter your `DASHBOARD_PIN` to unlock the terminal.
-   - Observe live ticker pricing, 4-card portfolio HUD, capital compounding HUD, and runner controls!
-   - Click the **Lock** icon in the top header to lock the terminal at any time.
+Add custom domain `trader.wilbergoose.com` in Vercel.
 
 ---
 
-## Useful Lightsail Commands
+## Part 3: Operational Verification
 
-```bash
-# Check trading engine status
-sudo systemctl status trading-engine
-
-# View live trading engine logs
-journalctl -u trading-engine -f
-
-# Restart trading engine
-sudo systemctl restart trading-engine
-
-# View Caddy TLS / access logs
-sudo journalctl -u caddy -f
-```
+1. **Verify Dedicated Live Engine**:
+   ```bash
+   curl -i https://engine.wilbergoose.com/api/health
+   # Expected: {"status":"healthy","host_mode":"LIVE", ...}
+   ```
+2. **Verify Backtests are Blocked on Live Host**:
+   ```bash
+   curl -X POST https://engine.wilbergoose.com/api/backtest/run
+   # Expected: HTTP 403 Forbidden ("Backtest engine is disabled on Live Production host...")
+   ```
+3. **Verify Revolut X Live Credentials**:
+   ```bash
+   curl -H "X-Engine-Secret: YOUR_SECRET" https://engine.wilbergoose.com/api/live/diagnostics
+   # Expected: {"status":"ACTIVE","authenticated":true,"can_trade":true,"latency_ms":...,"balances":{"GBP":...}}
+   ```
+4. **Visit `https://trader.wilbergoose.com`**:
+   - Opens **Paper Sandbox** by default.
+   - Click `[ 🔴 Live Capital ]` in the top header $\to$ confirmation modal appears $\to$ confirms $\to$ switches to Live Terminal with real Revolut X balances and active orders.
