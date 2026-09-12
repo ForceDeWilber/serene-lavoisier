@@ -205,8 +205,11 @@ class LiveTradingRunner:
                     self.authenticated = True
                     self.last_sync_time = time.time()
 
-                    # STRICT ZERO BALANCE CHECK: If settled GBP is 0.00, refuse to trade
-                    if self.balances["GBP"] <= 0.0:
+                    has_resting = len(self.resting_orders) > 0
+                    has_crypto = (self.balances.get("BTC", 0.0) > 0.0) or (self.balances.get("ETH", 0.0) > 0.0)
+
+                    # STRICT ZERO BALANCE CHECK: Only mark INSUFFICIENT_FUNDS if free GBP is 0 and no resting orders or crypto inventory exist
+                    if self.balances["GBP"] <= 0.0 and not has_resting and not has_crypto:
                         self.status = "INSUFFICIENT_FUNDS"
                         self.can_trade = False
                         self.status_message = "Revolut X account has £0.00 available GBP balance. Deposit GBP to activate live grid trading."
@@ -265,11 +268,16 @@ class LiveTradingRunner:
         # 2. Strict Live Check: Verify Revolut X credentials & real balances
         diag = await self.verify_credentials_and_balances()
 
+        # 3. Reconcile any existing resting orders on Revolut X
+        await self._reconcile_active_orders()
+
         if not diag.get("can_trade"):
             logger.warning(f"[LIVE] Live execution halted: {diag.get('error') or diag.get('message')}")
-        else:
-            logger.info("[LIVE] Live trading checks passed! Deploying live maker rungs...")
+        elif len(self.resting_orders) == 0 and self.balances.get("GBP", 0.0) >= 2.00:
+            logger.info("[LIVE] No resting orders found and GBP available. Deploying initial live maker rungs...")
             await self._deploy_initial_live_grids()
+        else:
+            logger.info(f"[LIVE] Live trading active with {len(self.resting_orders)} resting rungs on Revolut X book.")
 
         # 3. Start background live execution loop
         self.task = asyncio.create_task(self._live_execution_loop())
@@ -437,6 +445,7 @@ class LiveTradingRunner:
                     }
                     self.resting_orders.append(order_obj)
                     logger.info(f"[LIVE-ORDER-PLACED] {side} {qty:.6f} {symbol} @ £{price:,.2f} (VenueId: {venue_id})")
+                    await self._persist_order_to_db(order_obj, status="OPEN")
                     return order_obj
                 else:
                     logger.warning(f"[LIVE-ORDER-REJECT] Revolut X rejected order [{resp.status_code}]: {resp.text}")
@@ -522,7 +531,7 @@ class LiveTradingRunner:
                     active_items = data.get("data", []) if isinstance(data, dict) else data
                     active_ids = {
                         val for o in active_items if isinstance(o, dict)
-                        for val in (o.get("venue_order_id"), o.get("order_id"), o.get("client_order_id"))
+                        for val in (o.get("id"), o.get("venue_order_id"), o.get("order_id"), o.get("client_order_id"))
                         if val
                     }
 
@@ -540,6 +549,9 @@ class LiveTradingRunner:
                         if filled["side"] == "BUY":
                             # Placed paired SELL rung one step higher (+0.40%) to take profit
                             sell_px = round(filled["price"] * (1.0 + step), 2)
+                            if runner:
+                                runner["inventory_base"] = round(runner.get("inventory_base", 0.0) + filled["qty"], 8)
+                                runner["inventory_value_gbp"] = round(runner["inventory_base"] * filled["price"], 2)
                             logger.info(
                                 f"[LIVE-FILL] BUY filled for {filled['qty']} {filled['symbol']} @ £{filled['price']:,.2f}! "
                                 f"Placing paired profit-take SELL rung @ £{sell_px:,.2f}..."
@@ -558,6 +570,8 @@ class LiveTradingRunner:
                             if runner:
                                 runner["realized_pnl"] = round(runner["realized_pnl"] + profit, 2)
                                 runner["total_trades"] += 1
+                                runner["inventory_base"] = max(0.0, round(runner.get("inventory_base", 0.0) - filled["qty"], 8))
+                                runner["inventory_value_gbp"] = round(runner["inventory_base"] * filled["price"], 2)
                             buy_px = round(filled["price"] * (1.0 - step), 2)
                             logger.info(
                                 f"[LIVE-FILL] SELL filled for {filled['qty']} {filled['symbol']}! "
@@ -571,6 +585,8 @@ class LiveTradingRunner:
                                 qty=filled["qty"],
                                 rung_level=-abs(filled.get("rung_level", 1)),
                             )
+
+                        await self._persist_order_status(filled["id"], "FILLED")
 
                         self.live_trades.append({
                             "id": f"trade_{int(time.time()*1000)}_{self.trade_counter}",
@@ -594,26 +610,25 @@ class LiveTradingRunner:
                 await asyncio.sleep(2.0)
                 cycle += 1
 
+                # ALWAYS sync active orders to instantly catch fills
+                if self.authenticated and self.running:
+                    await self._sync_live_orders()
+
                 # Update prices from Kraken every 6 seconds
                 if cycle % 3 == 0:
                     await self._seed_market_data()
 
                 # Sync Revolut X balances and auto-detect deposits every 10 seconds
                 if cycle % 5 == 0:
-                    was_can_trade = self.can_trade
                     await self.verify_credentials_and_balances()
 
-                    # Autodetect deposit arrival: if capital is newly available and no orders are open
-                    if self.can_trade and self.balances["GBP"] >= 2.00:
-                        if not was_can_trade or len(self.resting_orders) == 0:
-                            logger.info(
-                                f"[LIVE-CAPITAL-AUTODETECT] Available GBP: £{self.balances['GBP']:,.2f}. "
-                                f"Auto-splitting and deploying initial maker grid rungs..."
-                            )
-                            await self._deploy_initial_live_grids()
-                        else:
-                            # If already deployed, sync fills to place counter-rungs
-                            await self._sync_live_orders()
+                    # Autodetect deposit arrival: if NEW unallocated capital arrives (>= £2.00) AND no orders exist
+                    if self.can_trade and self.balances["GBP"] >= 2.00 and len(self.resting_orders) == 0:
+                        logger.info(
+                            f"[LIVE-CAPITAL-AUTODETECT] Available GBP: £{self.balances['GBP']:,.2f}. "
+                            f"Auto-splitting and deploying initial maker grid rungs..."
+                        )
+                        await self._deploy_initial_live_grids()
 
             except asyncio.CancelledError:
                 break
@@ -651,6 +666,93 @@ class LiveTradingRunner:
         self.status = "ACTIVE" if self.can_trade else self.status
         self.status_message = "Circuit breaker reset. Live runners resumed."
         return {"status": "success", "message": self.status_message}
+
+    async def _persist_order_to_db(self, order_obj: Dict[str, Any], status: str = "OPEN"):
+        try:
+            from app.database import LiveSessionLocal
+            from app.models import OrderRecord
+            async with LiveSessionLocal() as session:
+                rec = OrderRecord(
+                    client_order_id=order_obj["id"],
+                    runner_id=order_obj["runner_id"],
+                    symbol=order_obj["symbol"],
+                    side=order_obj["side"],
+                    price=order_obj["price"],
+                    qty=order_obj["qty"],
+                    status=status,
+                )
+                session.add(rec)
+                await session.commit()
+        except Exception as e:
+            logger.debug(f"[DB-PERSIST] Order record log: {e}")
+
+    async def _persist_order_status(self, client_order_id: str, status: str):
+        try:
+            from app.database import LiveSessionLocal
+            from app.models import OrderRecord
+            from sqlalchemy import select
+            async with LiveSessionLocal() as session:
+                res = await session.execute(
+                    select(OrderRecord).where(OrderRecord.client_order_id == client_order_id)
+                )
+                rec = res.scalar_one_or_none()
+                if rec:
+                    rec.status = status
+                    await session.commit()
+        except Exception as e:
+            logger.debug(f"[DB-PERSIST] Order status update: {e}")
+
+    async def _reconcile_active_orders(self):
+        """Rehydrates self.resting_orders from Revolut X GET /api/1.0/orders/active on startup."""
+        path = "/api/1.0/orders/active"
+        headers = self._sign_request("GET", path)
+        if not headers:
+            return
+
+        try:
+            url = f"{self.base_url}{path}"
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    active_items = data.get("data", []) if isinstance(data, dict) else data
+                    reconciled = []
+                    for o in active_items:
+                        if not isinstance(o, dict):
+                            continue
+                        venue_id = o.get("id")
+                        cid = o.get("client_order_id") or venue_id
+                        sym = o.get("symbol", "").replace("-", "/")
+                        side = o.get("side", "").upper()
+                        px = float(o.get("price", 0.0))
+                        qty = float(o.get("quantity", 0.0))
+                        val = round(px * qty, 2)
+                        rid = "runner_btc" if "BTC" in sym else "runner_eth"
+                        
+                        created_ms = o.get("created_date", 0)
+                        if created_ms:
+                            created_str = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc).strftime("%H:%M:%S")
+                        else:
+                            created_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
+                        reconciled.append({
+                            "id": cid,
+                            "exchange_id": venue_id,
+                            "runner_id": rid,
+                            "symbol": sym,
+                            "side": side,
+                            "price": px,
+                            "qty": qty,
+                            "value_gbp": val,
+                            "created_at": created_str,
+                            "rung_level": -1 if side == "BUY" else 1,
+                            "distance_pct": 0.0,
+                            "is_live": True,
+                        })
+                    self.resting_orders = reconciled
+                    logger.info(f"[LIVE-RECONCILE] Rehydrated {len(reconciled)} resting orders directly from Revolut X order book.")
+        except Exception as e:
+            logger.error(f"[LIVE-RECONCILE-ERROR] Failed to reconcile active orders: {e}")
 
     def get_telemetry(self) -> Dict[str, Any]:
         """Generates comprehensive telemetry for Live Production mode."""
