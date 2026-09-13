@@ -37,3 +37,22 @@ class TelemetryRecord(Base):
     resting_orders_count = Column(Integer)
     circuit_breaker = Column(Boolean, default=False)
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+class PairConfiguration(Base):
+    __tablename__ = "pair_configurations"
+
+    symbol = Column(String, primary_key=True)
+    venue_symbol = Column(String, nullable=False)
+    base_asset = Column(String, nullable=False)
+    quote_asset = Column(String, nullable=False)
+    envelope_capital = Column(Float, default=500.0)
+    grid_step_pct = Column(Float, default=0.0040)
+    grid_rungs = Column(Integer, default=5)
+    order_size_fiat = Column(Float, default=50.0)
+    rebalance_threshold_pct = Column(Float, default=0.012)
+    sniper_enabled = Column(Boolean, default=True)
+    sniper_order_size_fiat = Column(Float, default=50.0)
+    sniper_hurdle_pct = Column(Float, default=0.0011)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+

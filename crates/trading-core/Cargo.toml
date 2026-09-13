@@ -17,3 +17,4 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+rusqlite = { workspace = true }

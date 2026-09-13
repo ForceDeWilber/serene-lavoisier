@@ -23,6 +23,17 @@ import {
   Shield,
   ArrowUpRight,
   ArrowDownRight,
+  Coins,
+  Cpu,
+  Crosshair,
+  Radio,
+  CheckCircle2,
+  Eye,
+  Search,
+  FileText,
+  BarChart2,
+  Plus,
+  X,
 } from "lucide-react";
 
 interface RunnerTelemetry {
@@ -54,31 +65,41 @@ interface RestingOrder {
 }
 
 interface LiveTradeEvent {
-  id: number;
-  timestamp: number;
-  time_str: string;
-  runner_id: string;
+  id: string | number;
+  timestamp?: number | string;
+  time_str?: string;
+  runner_id?: string;
   symbol: string;
-  action: string;
+  side?: "BUY" | "SELL" | string;
+  action?: string;
   price: number;
   qty: number;
-  profit: number;
-  note: string;
+  value_gbp?: number;
+  fee_gbp?: number;
+  profit?: number;
+  pnl_gbp?: number;
+  strategy?: string;
+  note?: string;
 }
 
 interface MarketPriceInfo {
-  price: number;
-  high24h: number;
-  low24h: number;
-  change24h: number;
-  yesterday_close: number;
+  price: number | null;
+  status?: string;
+  disclaimer?: string | null;
+  high24h?: number | null;
+  low24h?: number | null;
+  change24h?: number | null;
+  yesterday_close?: number | null;
+  timestamp?: string | null;
 }
 
 interface VenueRadarItem {
   symbol: string;
-  kraken_price: number;
-  revolut_best_bid: number;
-  revolut_best_ask: number;
+  status?: string;
+  disclaimer?: string | null;
+  kraken_price: number | null;
+  revolut_best_bid: number | null;
+  revolut_best_ask: number | null;
   revolut_spread_gbp: number;
   revolut_spread_pct: number;
   buy_opportunity_pct: number;
@@ -96,6 +117,8 @@ interface SniperTelemetry {
   snipe_order_size_gbp: number;
   min_net_edge_pct: number;
   revolut_taker_fee_pct: number;
+  revolut_maker_fee_pct?: number;
+  scratch_timeout_ms?: number;
   total_snipes: number;
   successful_snipes: number;
   win_rate_pct: number;
@@ -119,6 +142,7 @@ interface CapitalManagement {
   rungs_per_side: number;
   split_btc_pct: number;
   split_eth_pct: number;
+  split_sol_pct?: number;
   allocations: {
     trading_power_gbp: number;
     expansion_ratio: number;
@@ -134,10 +158,50 @@ interface CapitalManagement {
       rungs_per_side: number;
       order_size_gbp: number;
     };
+    runner_sol?: {
+      envelope_gbp: number;
+      split_pct: number;
+      rungs_per_side: number;
+      order_size_gbp: number;
+    };
     sniper: {
       order_size_gbp: number;
     };
   };
+}
+
+interface EngineActivityItem {
+  id: string;
+  time: string;
+  pair: string;
+  event: string;
+  spread_eval: string;
+  status: string;
+  disclaimer?: string | null;
+}
+
+interface EngineActivity {
+  title: string;
+  status: string;
+  status_code: string;
+  summary: string;
+  timestamp: string;
+  oracle_latency_ms: number;
+  drawdown_pct: number;
+  circuit_breaker: string;
+  pairs_monitored: number;
+  target_hurdle_pct: number;
+  activities?: EngineActivityItem[];
+}
+
+interface EngineDecision {
+  id: string;
+  timestamp: string;
+  category: string;
+  badge: string;
+  title: string;
+  detail: string;
+  status: string;
 }
 
 interface TelemetryPayload {
@@ -164,6 +228,8 @@ interface TelemetryPayload {
   market_prices?: Record<string, MarketPriceInfo>;
   runners: RunnerTelemetry[];
   sniper?: SniperTelemetry;
+  engine_activity?: EngineActivity;
+  engine_decisions?: EngineDecision[];
   resting_orders?: RestingOrder[];
   resting_orders_count: number;
   live_trades?: LiveTradeEvent[];
@@ -171,39 +237,47 @@ interface TelemetryPayload {
 }
 
 export default function ProductionDashboard() {
-  // Completely separate state stores: Paper and Live are 2 strictly independent entities
-  const [paperTelemetry, setPaperTelemetry] = useState<TelemetryPayload | null>(null);
-  const [liveTelemetry, setLiveTelemetry] = useState<TelemetryPayload | null>(null);
-
+  const [telemetry, setTelemetry] = useState<TelemetryPayload | null>(null);
   const [connected, setConnected] = useState<boolean>(false);
   const [lastSeenTs, setLastSeenTs] = useState<number | null>(null);
   const [isFeedStale, setIsFeedStale] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>("");
 
-  const [activeMode, setActiveMode] = useState<"paper" | "live">("paper");
-  const [liveConfirmModalOpen, setLiveConfirmModalOpen] = useState<boolean>(false);
   const [verifyingLive, setVerifyingLive] = useState<boolean>(false);
-
   const [viewMode, setViewMode] = useState<"monitor" | "tuning">("monitor");
-  const [assetFilter, setAssetFilter] = useState<"ALL" | "BTC" | "ETH">("ALL");
-  const [tapeFilter, setTapeFilter] = useState<"ALL" | "SNIPES" | "GRIDS">("ALL");
+  const [assetFilter, setAssetFilter] = useState<string>("ALL");
+  const [historyFilter, setHistoryFilter] = useState<string>("ALL");
 
   const [killModalOpen, setKillModalOpen] = useState<boolean>(false);
+  const [addPairModalOpen, setAddPairModalOpen] = useState<boolean>(false);
+  const [newPair, setNewPair] = useState({
+    base: "BTC",
+    quote: "USD",
+    envelope_capital: "500",
+    grid_step_pct: "0.40",
+    order_size_fiat: "50",
+    sniper_enabled: true,
+  });
+  const [submittingPair, setSubmittingPair] = useState<boolean>(false);
+  const [mounted, setMounted] = useState<boolean>(false);
 
   const [runnerParams, setRunnerParams] = useState<Record<string, { step_pct: string; rebalance_pct: string }>>({
     runner_btc: { step_pct: "0.40", rebalance_pct: "2.0" },
     runner_eth: { step_pct: "0.40", rebalance_pct: "2.0" },
+    runner_sol: { step_pct: "0.60", rebalance_pct: "2.5" },
   });
 
   const [sniperParams, setSniperParams] = useState({
-    impulse_threshold_pct: "0.18",
+    impulse_threshold_pct: "0.11",
     snipe_order_size_gbp: "50",
-    min_net_edge_pct: "0.05",
+    min_net_edge_pct: "0.02",
   });
 
   const [capitalParams, setCapitalParams] = useState({
     profit_lock_pct: "30",
-    split_btc_pct: "50",
+    split_btc_pct: "40",
+    split_eth_pct: "30",
+    split_sol_pct: "30",
     starting_balance_gbp: "10",
   });
   const [syncingRevolut, setSyncingRevolut] = useState<boolean>(false);
@@ -214,19 +288,12 @@ export default function ProductionDashboard() {
   const REFRESH_INTERVAL_MS = 1000;
   const STALE_THRESHOLD_MS = 2500;
 
-  // Active telemetry is strictly partitioned by the current mode
-  const telemetry = activeMode === "live" ? liveTelemetry : paperTelemetry;
-
-  const fetchTelemetry = async (targetMode: "paper" | "live") => {
+  const fetchTelemetry = async () => {
     try {
-      const res = await fetch(`/api/proxy/telemetry?mode=${targetMode}`);
+      const res = await fetch(`/api/proxy/telemetry?mode=live`);
       if (res.ok) {
         const data: TelemetryPayload = await res.json();
-        if (targetMode === "live") {
-          setLiveTelemetry(data);
-        } else {
-          setPaperTelemetry(data);
-        }
+        setTelemetry(data);
         setConnected(true);
         lastSeenRef.current = Date.now();
         setLastSeenTs(lastSeenRef.current);
@@ -235,64 +302,32 @@ export default function ProductionDashboard() {
     } catch {}
   };
 
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      const m = params.get("mode");
-      if (m === "live") {
-        setActiveMode("live");
-      } else {
-        setActiveMode("paper");
-      }
-    }
-  }, []);
-
-  const handleSwitchMode = (targetMode: "paper" | "live") => {
-    if (targetMode === activeMode) return;
-    if (targetMode === "live") {
-      setLiveConfirmModalOpen(true);
-    } else {
-      performSwitchMode("paper");
-    }
-  };
-
-  const performSwitchMode = (targetMode: "paper" | "live") => {
-    setActiveMode(targetMode);
-    if (typeof window !== "undefined") {
-      const url = new URL(window.location.href);
-      url.searchParams.set("mode", targetMode);
-      window.history.pushState({}, "", url.toString());
-    }
-    // Fetch immediately for the selected mode
-    fetchTelemetry(targetMode);
-  };
-
   const handleVerifyLiveCredentials = async () => {
     setVerifyingLive(true);
     try {
       const res = await fetch("/api/proxy/live/diagnostics");
       const data = await res.json();
       if (data.can_trade) {
-        setStatusMessage("Revolut X credentials verified · Ready for live execution");
+        setStatusMessage("Revolut X API authentication verified · Connected over HTTP/2");
       } else {
-        setStatusMessage(`Live check: ${data.message || data.status}`);
+        setStatusMessage(`Connection status: ${data.message || data.status}`);
       }
-      fetchTelemetry("live");
+      fetchTelemetry();
     } catch {
-      setStatusMessage("Failed to connect to Live diagnostics");
+      setStatusMessage("Failed to connect to Revolut X diagnostics");
     } finally {
       setVerifyingLive(false);
     }
   };
 
   useEffect(() => {
+    setMounted(true);
     let active = true;
 
-    // Fetch immediately on mode change
-    fetchTelemetry(activeMode);
+    fetchTelemetry();
     const pollInterval = setInterval(() => {
       if (active) {
-        fetchTelemetry(activeMode);
+        fetchTelemetry();
       }
     }, REFRESH_INTERVAL_MS);
 
@@ -306,7 +341,7 @@ export default function ProductionDashboard() {
       clearInterval(pollInterval);
       if (stalenessCheckTimer.current) clearInterval(stalenessCheckTimer.current);
     };
-  }, [activeMode]);
+  }, []);
 
   useEffect(() => {
     if (telemetry?.runners) {
@@ -336,30 +371,19 @@ export default function ProductionDashboard() {
       setCapitalParams((prev) => ({
         profit_lock_pct: prev.profit_lock_pct || String(Math.round(cm.profit_lock_pct * 100)),
         split_btc_pct: prev.split_btc_pct || String(Math.round(cm.split_btc_pct * 100)),
+        split_eth_pct: prev.split_eth_pct || String(Math.round(cm.split_eth_pct * 100)),
+        split_sol_pct: prev.split_sol_pct || String(Math.round((cm.split_sol_pct || 0.3) * 100)),
         starting_balance_gbp: prev.starting_balance_gbp || String(cm.starting_balance_gbp),
       }));
     }
   }, [telemetry]);
-
-  const handleTogglePause = async (runnerId: string, currentlyPaused: boolean) => {
-    const action = currentlyPaused ? "resume" : "pause";
-    try {
-      const res = await fetch(`/api/proxy/runners/${runnerId}/${action}?mode=${activeMode}`, {
-        method: "POST",
-      });
-      if (res.ok) {
-        setStatusMessage(`Runner ${runnerId} ${action}d`);
-        fetchTelemetry(activeMode);
-      }
-    } catch {}
-  };
 
   const handleTuneRunner = async (runnerId: string) => {
     const params = runnerParams[runnerId];
     if (!params) return;
 
     try {
-      const res = await fetch(`/api/proxy/runners/${runnerId}/tune?mode=${activeMode}`, {
+      const res = await fetch(`/api/proxy/runners/${runnerId}/tune?mode=live`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -369,25 +393,7 @@ export default function ProductionDashboard() {
       });
       if (res.ok) {
         setStatusMessage(`Parameters updated for ${runnerId}`);
-        fetchTelemetry(activeMode);
-      }
-    } catch {}
-  };
-
-  const handleTuneSniper = async () => {
-    try {
-      const res = await fetch(`/api/proxy/sniper/tune?mode=${activeMode}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          impulse_threshold_pct: parseFloat(sniperParams.impulse_threshold_pct),
-          snipe_order_size_gbp: parseFloat(sniperParams.snipe_order_size_gbp),
-          min_net_edge_pct: parseFloat(sniperParams.min_net_edge_pct),
-        }),
-      });
-      if (res.ok) {
-        setStatusMessage("Sniper parameters updated");
-        fetchTelemetry(activeMode);
+        fetchTelemetry();
       }
     } catch {}
   };
@@ -395,50 +401,50 @@ export default function ProductionDashboard() {
   const handleToggleSniper = async () => {
     const nextState = !telemetry?.sniper?.enabled;
     try {
-      const res = await fetch(`/api/proxy/sniper/${nextState ? "arm" : "disarm"}?mode=${activeMode}`, {
+      const res = await fetch(`/api/proxy/sniper/${nextState ? "arm" : "disarm"}?mode=live`, {
         method: "POST",
       });
       if (res.ok) {
-        setStatusMessage(`Sniper ${nextState ? "armed" : "disarmed"}`);
-        fetchTelemetry(activeMode);
+        setStatusMessage(`Strategy ${nextState ? "activated" : "paused"}`);
+        fetchTelemetry();
       }
     } catch {}
   };
 
   const handleKillSwitch = async () => {
     try {
-      const res = await fetch(`/api/proxy/circuit-breaker/kill?mode=${activeMode}`, {
+      const res = await fetch(`/api/proxy/circuit-breaker/kill?mode=live`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason: "Manual halt triggered from control desk" }),
       });
       if (res.ok) {
-        setStatusMessage("Circuit breaker tripped · All orders halted");
+        setStatusMessage("Circuit breaker tripped · Execution halted");
         setKillModalOpen(false);
-        fetchTelemetry(activeMode);
+        fetchTelemetry();
       }
     } catch {}
   };
 
   const handleResetCircuitBreaker = async () => {
     try {
-      const res = await fetch(`/api/proxy/circuit-breaker/reset?mode=${activeMode}`, {
+      const res = await fetch(`/api/proxy/circuit-breaker/reset?mode=live`, {
         method: "POST",
       });
       if (res.ok) {
         setStatusMessage("Circuit breaker reset");
-        fetchTelemetry(activeMode);
+        fetchTelemetry();
       }
     } catch {}
   };
 
-  const handleConfigureCapital = async (updates?: Partial<{ profit_lock_pct: number; split_btc_pct: number; starting_balance_gbp: number }>) => {
-    const lockVal = updates?.profit_lock_pct !== undefined ? updates.profit_lock_pct : parseFloat(capitalParams.profit_lock_pct) / 100;
-    const splitVal = updates?.split_btc_pct !== undefined ? updates.split_btc_pct : parseFloat(capitalParams.split_btc_pct) / 100;
-    const startingVal = updates?.starting_balance_gbp !== undefined ? updates.starting_balance_gbp : parseFloat(capitalParams.starting_balance_gbp);
+  const handleConfigureCapital = async () => {
+    const lockVal = parseFloat(capitalParams.profit_lock_pct) / 100;
+    const splitVal = parseFloat(capitalParams.split_btc_pct) / 100;
+    const startingVal = parseFloat(capitalParams.starting_balance_gbp);
 
     try {
-      const res = await fetch(`/api/proxy/capital/configure?mode=${activeMode}`, {
+      const res = await fetch(`/api/proxy/capital/configure?mode=live`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -449,7 +455,7 @@ export default function ProductionDashboard() {
       });
       if (res.ok) {
         setStatusMessage("Capital allocation updated");
-        fetchTelemetry(activeMode);
+        fetchTelemetry();
       }
     } catch {}
   };
@@ -459,11 +465,43 @@ export default function ProductionDashboard() {
     try {
       const res = await fetch("/api/proxy/capital/sync-revolut", { method: "POST" });
       if (res.ok) {
-        setStatusMessage("Balances synchronized");
-        fetchTelemetry(activeMode);
+        setStatusMessage("Balances synchronized from Revolut X");
+        fetchTelemetry();
       }
     } catch {} finally {
       setSyncingRevolut(false);
+    }
+  };
+
+  const handleAddPair = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmittingPair(true);
+    try {
+      const sym = `${newPair.base.trim().toUpperCase()}/${newPair.quote.trim().toUpperCase()}`;
+      const res = await fetch("/api/proxy/pairs?mode=live", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: sym,
+          base_asset: newPair.base.trim().toUpperCase(),
+          quote_asset: newPair.quote.trim().toUpperCase(),
+          envelope_capital: parseFloat(newPair.envelope_capital) || 500.0,
+          grid_step_pct: (parseFloat(newPair.grid_step_pct) || 0.4) / 100,
+          order_size_fiat: parseFloat(newPair.order_size_fiat) || 50.0,
+          sniper_enabled: newPair.sniper_enabled,
+        }),
+      });
+      if (res.ok) {
+        setStatusMessage(`Pair ${sym} hot-spawned in Rust Engine`);
+        setAddPairModalOpen(false);
+        fetchTelemetry();
+      } else {
+        setStatusMessage("Failed to hot-spawn pair");
+      }
+    } catch {
+      setStatusMessage("Network error while adding pair");
+    } finally {
+      setSubmittingPair(false);
     }
   };
 
@@ -481,126 +519,170 @@ export default function ProductionDashboard() {
   const restingOrders = telemetry?.resting_orders || [];
   const liveTrades = telemetry?.live_trades || [];
 
+  // Balances (Multi-Currency: GBP, USD, BTC, ETH, SOL)
+  const gbpBalance = telemetry?.balances?.GBP ?? 0;
+  const usdBalance = telemetry?.balances?.USD ?? 0;
+  const btcBalance = telemetry?.balances?.BTC ?? 0;
+  const ethBalance = telemetry?.balances?.ETH ?? 0;
+  const solBalance = telemetry?.balances?.SOL ?? 0;
+
+  const btcPrice = telemetry?.market_prices?.["BTC/GBP"]?.price ?? null;
+  const ethPrice = telemetry?.market_prices?.["ETH/GBP"]?.price ?? null;
+  const solPrice = telemetry?.market_prices?.["SOL/GBP"]?.price ?? null;
+
+  const btcStatus = telemetry?.market_prices?.["BTC/GBP"]?.status ?? "NO_DATA";
+  const ethStatus = telemetry?.market_prices?.["ETH/GBP"]?.status ?? "NO_DATA";
+  const solStatus = telemetry?.market_prices?.["SOL/GBP"]?.status ?? "NO_DATA";
+
+  const btcDisc = telemetry?.market_prices?.["BTC/GBP"]?.disclaimer ?? null;
+  const ethDisc = telemetry?.market_prices?.["ETH/GBP"]?.disclaimer ?? null;
+  const solDisc = telemetry?.market_prices?.["SOL/GBP"]?.disclaimer ?? null;
+
+  const btcValueGbp = btcPrice !== null ? btcBalance * btcPrice : null;
+  const ethValueGbp = ethPrice !== null ? ethBalance * ethPrice : null;
+  const solValueGbp = solPrice !== null ? solBalance * solPrice : null;
+
+  const cryptoSum = (btcValueGbp ?? 0) + (ethValueGbp ?? 0) + (solValueGbp ?? 0);
+  const totalEquityCalculated = gbpBalance + cryptoSum;
+  const totalEquity = portfolio?.total_equity_gbp ?? totalEquityCalculated;
+
+  // Single streamlined engine activity
+  const engineActivity: EngineActivity = telemetry?.engine_activity || {
+    title: "Sub-Second Ingestion & Dislocation Scanner",
+    status: "STREAMING",
+    status_code: "ACTIVE",
+    summary: "Kraken Pro WS v2 active. Continuous evaluation against +0.110% net dislocation hurdle.",
+    timestamp: "Live Stream",
+    oracle_latency_ms: telemetry?.latency_ms || 12,
+    drawdown_pct: 0.0,
+    circuit_breaker: cbTripped ? "TRIPPED" : "NORMAL",
+    pairs_monitored: 3,
+    target_hurdle_pct: 0.110,
+    activities: [],
+  };
+
+  // Dynamically extract distinct assets from active runners
+  const activeAssets = React.useMemo(() => {
+    const set = new Set<string>();
+    (telemetry?.runners || []).forEach((r) => {
+      const base = r.symbol.split("/")[0] || r.symbol.split("-")[0];
+      if (base) set.add(base.toUpperCase());
+    });
+    if (set.size === 0) return ["BTC", "ETH", "SOL"];
+    return Array.from(set);
+  }, [telemetry?.runners]);
+
   const filteredOrders = restingOrders.filter((o) => {
-    if (assetFilter === "BTC") return o.symbol.includes("BTC");
-    if (assetFilter === "ETH") return o.symbol.includes("ETH");
-    return true;
+    if (assetFilter === "ALL") return true;
+    return o.symbol.toUpperCase().includes(assetFilter.toUpperCase());
   });
 
   const filteredTrades = liveTrades.filter((t) => {
-    if (tapeFilter === "SNIPES") return t.action.includes("SNIPE");
-    if (tapeFilter === "GRIDS") return t.action === "BUY" || t.action === "SELL";
-    return true;
+    if (historyFilter === "ALL") return true;
+    return t.symbol.toUpperCase().includes(historyFilter.toUpperCase());
   });
 
-  const liveUnconfigured = activeMode === "live" && (!telemetry?.authenticated || telemetry?.status === "UNCONFIGURED" || telemetry?.status === "AUTH_ERROR");
-  const liveUnfunded = activeMode === "live" && telemetry?.authenticated && (telemetry?.status === "INSUFFICIENT_FUNDS" || (telemetry?.balances?.GBP ?? 0) <= 0.0);
+  const liveUnconfigured = !telemetry?.authenticated || telemetry?.status === "UNCONFIGURED" || telemetry?.status === "AUTH_ERROR" || telemetry?.status === "ERROR";
+  const isIpcDisconnected = telemetry?.status === "IPC_DISCONNECTED";
+  const liveUnfunded = telemetry?.authenticated && !isIpcDisconnected && (telemetry?.status === "INSUFFICIENT_FUNDS" || (gbpBalance <= 0.0 && btcBalance <= 0.0 && ethBalance <= 0.0 && solBalance <= 0.0));
+
+  const trackedPairs = ["BTC/GBP", "ETH/GBP", "SOL/GBP"] as const;
 
   return (
     <main className="min-h-screen bg-[#0d1117] text-[#e6edf3] p-4 md:p-6 space-y-4 max-w-7xl mx-auto">
-      {/* 1. Header */}
+      {/* 1. Header: Clean Institutional Terminal */}
       <header className="bg-[#161b22] border border-[#30363d] rounded-xl px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3 shadow-sm">
         <div className="flex items-center gap-3">
-          <div className="w-7 h-7 rounded-lg bg-[#21262d] border border-[#30363d] flex items-center justify-center text-[#8b949e]">
-            <Activity className="w-4 h-4 text-[#7d8590]" />
+          <div className="w-8 h-8 rounded-lg bg-[#21262d] border border-[#30363d] flex items-center justify-center text-[#58a6ff]">
+            <Activity className="w-4 h-4 text-[#58a6ff]" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5">
               <span className="text-sm font-semibold tracking-tight text-[#f0f6fc]">
                 Serene Lavoisier
               </span>
-              <span className="text-[11px] font-mono text-[#8b949e] px-1.5 py-0.2 rounded bg-[#21262d] border border-[#30363d]">
-                {activeMode === "live" ? "Live Environment" : "Paper Sandbox"}
-              </span>
+              <div className="flex items-center gap-1.5 bg-[#0d1117] border border-emerald-500/40 px-2.5 py-0.5 rounded-md text-xs font-mono">
+                <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                <span className="font-semibold text-emerald-400 text-[10px] tracking-wide">
+                  REVOLUT X LIVE TERMINAL
+                </span>
+                <span className="text-[#8b949e] border-l border-[#30363d] pl-1.5 text-[9px]">
+                  RUST ENGINE
+                </span>
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Controls */}
+        {/* Desk Controls */}
         <div className="flex items-center gap-2.5 flex-wrap">
-          {/* Segmented Mode Switcher */}
-          <div className="bg-[#0d1117] border border-[#30363d] p-0.5 rounded-lg flex items-center text-xs">
-            <button
-              onClick={() => handleSwitchMode("paper")}
-              className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${
-                activeMode === "paper"
-                  ? "bg-[#21262d] text-[#f0f6fc] shadow-sm"
-                  : "text-[#8b949e] hover:text-[#c9d1d9]"
-              }`}
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-[#3fb950]" />
-              <span>Paper</span>
-            </button>
-            <button
-              onClick={() => handleSwitchMode("live")}
-              className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${
-                activeMode === "live"
-                  ? "bg-[#21262d] text-[#f85149] shadow-sm font-semibold"
-                  : "text-[#8b949e] hover:text-[#f85149]"
-              }`}
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-[#f85149]" />
-              <span>Live</span>
-            </button>
-          </div>
-
-          {/* Feed Status Indicator */}
+          {/* Feed Latency */}
           <div className="text-xs font-mono text-[#8b949e] flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0d1117] border border-[#30363d]">
-            <span className={`w-1.5 h-1.5 rounded-full ${connected && !isFeedStale ? "bg-[#3fb950]" : "bg-[#d29922]"}`} />
-            <span>{connected && !isFeedStale ? `Feed · ${telemetry?.latency_ms || 14}ms` : "Stale feed"}</span>
+            <span className={`w-1.5 h-1.5 rounded-full ${connected && !isFeedStale ? "bg-emerald-400" : "bg-[#d29922]"}`} />
+            <span>{connected && !isFeedStale ? `Feed · ${telemetry?.latency_ms || 12}ms` : "Syncing..."}</span>
           </div>
 
-          {/* View Mode Switcher */}
+          {/* View Mode */}
           <div className="bg-[#0d1117] border border-[#30363d] p-0.5 rounded-lg flex items-center text-xs">
             <button
               onClick={() => setViewMode("monitor")}
-              className={`px-2.5 py-1 rounded-md transition text-xs ${
+              className={`px-2.5 py-1 rounded-md transition text-xs font-medium ${
                 viewMode === "monitor" ? "bg-[#21262d] text-[#f0f6fc]" : "text-[#8b949e] hover:text-[#c9d1d9]"
               }`}
             >
-              Monitor
+              Monitor Desk
             </button>
             <button
               onClick={() => setViewMode("tuning")}
-              className={`px-2.5 py-1 rounded-md transition text-xs ${
+              className={`px-2.5 py-1 rounded-md transition text-xs font-medium ${
                 viewMode === "tuning" ? "bg-[#21262d] text-[#f0f6fc]" : "text-[#8b949e] hover:text-[#c9d1d9]"
               }`}
             >
-              Tuning
+              Parameters
             </button>
           </div>
 
-          {/* Circuit Breaker Pill */}
+          {/* Add Pair Button */}
+          <button
+            onClick={() => setAddPairModalOpen(true)}
+            className="text-xs text-emerald-400 hover:text-white bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 px-2.5 py-1 rounded-lg transition font-medium flex items-center gap-1 font-mono"
+            title="Dynamically configure and spawn a new trading pair in Rust engine"
+          >
+            <Plus className="w-3 h-3" />
+            <span>Add Pair</span>
+          </button>
+
+          {/* Risk State */}
           <div className={`text-xs px-2.5 py-1 rounded-lg border font-mono flex items-center gap-1.5 ${
             cbTripped
               ? "bg-[#f85149]/10 text-[#f85149] border-[#f85149]/40"
               : "bg-[#0d1117] text-[#8b949e] border-[#30363d]"
           }`}>
             <Shield className="w-3 h-3" />
-            <span>{cbTripped ? "Breaker Tripped" : "Normal"}</span>
+            <span>{cbTripped ? "Circuit Tripped" : "Risk: Normal"}</span>
             {cbTripped && (
               <button
                 onClick={handleResetCircuitBreaker}
-                className="underline ml-1 hover:text-white"
+                className="underline ml-1 hover:text-white font-semibold"
               >
                 Reset
               </button>
             )}
           </div>
 
-          {/* Emergency Halt Button */}
+          {/* Emergency Halt */}
           <button
             onClick={() => setKillModalOpen(true)}
             className="text-xs text-[#f85149] hover:text-white bg-[#f85149]/10 hover:bg-[#f85149]/20 border border-[#f85149]/30 px-2.5 py-1 rounded-lg transition font-medium flex items-center gap-1"
           >
             <Power className="w-3 h-3" />
-            <span>Halt</span>
+            <span>Halt Execution</span>
           </button>
 
-          {/* Lock Terminal */}
+          {/* Lock */}
           <button
             onClick={handleLogout}
-            title="Lock session"
+            title="Lock terminal session"
             className="text-[#8b949e] hover:text-[#f0f6fc] bg-[#0d1117] border border-[#30363d] hover:border-[#8b949e] p-1.5 rounded-lg transition"
           >
             <Lock className="w-3.5 h-3.5" />
@@ -608,29 +690,31 @@ export default function ProductionDashboard() {
         </div>
       </header>
 
-      {/* 2. Notification / Diagnostics Banner */}
+      {/* 2. Notifications & Diagnostics */}
       {statusMessage && (
-        <div className="bg-[#161b22] border border-[#30363d] text-[#e6edf3] px-3.5 py-2 rounded-lg text-xs font-mono flex items-center justify-between">
-          <span>{statusMessage}</span>
+        <div className="bg-[#161b22] border border-[#30363d] text-[#e6edf3] px-3.5 py-2 rounded-lg text-xs font-mono flex items-center justify-between shadow-xs">
+          <div className="flex items-center gap-2">
+            <Radio className="w-3.5 h-3.5 text-[#58a6ff]" />
+            <span>{statusMessage}</span>
+          </div>
           <button onClick={() => setStatusMessage("")} className="text-[#8b949e] hover:text-white">
             Dismiss
           </button>
         </div>
       )}
 
-      {/* Understated Live Mode Diagnostics (Only when action needed) */}
       {liveUnconfigured && (
-        <div className="bg-[#161b22] border border-[#f85149]/40 px-3.5 py-2 rounded-lg text-xs flex items-center justify-between gap-3 text-[#f0f6fc]">
+        <div className="bg-[#161b22] border border-[#f85149]/40 px-3.5 py-2.5 rounded-lg text-xs flex items-center justify-between gap-3 text-[#f0f6fc]">
           <div className="flex items-center gap-2 font-mono">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#f85149]" />
-            <span className="text-[#f85149]">Live Unauthenticated</span>
+            <span className="w-2 h-2 rounded-full bg-[#f85149]" />
+            <span className="text-[#f85149] font-semibold">{telemetry?.status === "ERROR" ? "Engine Offline" : "Authentication Required"}</span>
             <span className="text-[#8b949e]">·</span>
-            <span className="text-[#8b949e]">Revolut X API key or private key missing on host. Real orders blocked.</span>
+            <span className="text-[#8b949e]">{telemetry?.status_message || "Revolut X API key or credentials missing on host."}</span>
           </div>
           <button
             onClick={handleVerifyLiveCredentials}
             disabled={verifyingLive}
-            className="px-2.5 py-1 rounded bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-xs font-mono text-[#c9d1d9] transition flex items-center gap-1.5 flex-shrink-0"
+            className="px-3 py-1 rounded bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-xs font-mono text-[#c9d1d9] transition flex items-center gap-1.5 flex-shrink-0"
           >
             <RefreshCw className={`w-3 h-3 ${verifyingLive ? "animate-spin" : ""}`} />
             <span>Verify</span>
@@ -639,17 +723,17 @@ export default function ProductionDashboard() {
       )}
 
       {liveUnfunded && (
-        <div className="bg-[#161b22] border border-[#d29922]/40 px-3.5 py-2 rounded-lg text-xs flex items-center justify-between gap-3 text-[#f0f6fc]">
+        <div className="bg-[#161b22] border border-[#d29922]/40 px-3.5 py-2.5 rounded-lg text-xs flex items-center justify-between gap-3 text-[#f0f6fc]">
           <div className="flex items-center gap-2 font-mono">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#d29922]" />
-            <span className="text-[#d29922]">Account Unfunded</span>
+            <span className="w-2 h-2 rounded-full bg-[#d29922]" />
+            <span className="text-[#d29922] font-semibold">Account Unfunded</span>
             <span className="text-[#8b949e]">·</span>
-            <span className="text-[#8b949e]">Available balance is £0.00 GBP. Deposit funds on Revolut X to resume trading.</span>
+            <span className="text-[#8b949e]">Revolut X available cash is £0.00 GBP. Deposit funds to execute orders.</span>
           </div>
           <button
             onClick={handleVerifyLiveCredentials}
             disabled={verifyingLive}
-            className="px-2.5 py-1 rounded bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-xs font-mono text-[#c9d1d9] transition flex items-center gap-1.5 flex-shrink-0"
+            className="px-3 py-1 rounded bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-xs font-mono text-[#c9d1d9] transition flex items-center gap-1.5 flex-shrink-0"
           >
             <RefreshCw className={`w-3 h-3 ${verifyingLive ? "animate-spin" : ""}`} />
             <span>Check Balance</span>
@@ -657,230 +741,724 @@ export default function ProductionDashboard() {
         </div>
       )}
 
-      {/* 3. Ticker Bar */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {["BTC/GBP", "ETH/GBP"].map((sym) => {
-          const mkt = telemetry?.market_prices?.[sym];
-          const radar = sniper?.radar?.[sym];
-          const krakenP = mkt?.price ?? (sym === "BTC/GBP" ? 57020 : 1820);
-          const revBid = radar?.revolut_best_bid ?? (krakenP * 0.9995);
-          const revAsk = radar?.revolut_best_ask ?? (krakenP * 1.0005);
-          const change = mkt?.change24h ?? 0.0;
-          const spreadGbp = roundToTwo(revAsk - revBid);
-          const spreadBps = roundToTwo(((revAsk - revBid) / revBid) * 10000);
+      {isIpcDisconnected && (
+        <div className="bg-[#161b22] border border-[#f85149]/40 px-3.5 py-2.5 rounded-lg text-xs flex items-center justify-between gap-3 text-[#f0f6fc]">
+          <div className="flex items-center gap-2 font-mono">
+            <span className="w-2 h-2 rounded-full bg-[#f85149]" />
+            <span className="text-[#f85149] font-semibold">Rust Engine Disconnected</span>
+            <span className="text-[#8b949e]">·</span>
+            <span className="text-[#8b949e]">Cannot reach Rust Engine Daemon over IPC. Ensure engine-daemon is running.</span>
+          </div>
+          <button
+            onClick={fetchTelemetry}
+            className="px-3 py-1 rounded bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-xs font-mono text-[#c9d1d9] transition flex items-center gap-1.5 flex-shrink-0"
+          >
+            <RefreshCw className="w-3 h-3" />
+            <span>Retry</span>
+          </button>
+        </div>
+      )}
 
-          return (
-            <div key={sym} className="bg-[#161b22] border border-[#30363d] rounded-xl p-3.5 flex flex-col justify-between shadow-sm">
-              <div className="flex items-center justify-between border-b border-[#30363d]/60 pb-2.5">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono font-semibold text-sm text-[#f0f6fc]">{sym}</span>
-                  <span className={`text-[11px] font-mono px-1.5 py-0.5 rounded ${
-                    change >= 0 ? "text-[#3fb950] bg-[#3fb950]/10" : "text-[#f85149] bg-[#f85149]/10"
+      {/* 3. REVOLUT X ACCOUNT BALANCES (Multi-Asset: Cash, BTC, ETH, SOL) */}
+      <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm">
+        <div className="flex items-center justify-between border-b border-[#30363d]/60 pb-2.5 mb-3">
+          <div className="flex items-center gap-2">
+            <Coins className="w-4 h-4 text-[#58a6ff]" />
+            <span className="text-xs font-semibold text-[#f0f6fc] uppercase tracking-wider">
+              Revolut X Account Balances
+            </span>
+          </div>
+          <button
+            onClick={handleSyncRevolutBalances}
+            disabled={syncingRevolut}
+            className="text-xs font-mono text-[#8b949e] hover:text-[#f0f6fc] flex items-center gap-1.5 transition px-2 py-0.5 rounded bg-[#0d1117] border border-[#30363d]"
+          >
+            <RefreshCw className={`w-3 h-3 ${syncingRevolut ? "animate-spin" : ""}`} />
+            <span>Sync Revolut</span>
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          {/* Total Account Equity */}
+          <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
+            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
+              Total Account Valuation
+            </span>
+            <div className="text-xl font-mono font-bold text-[#f0f6fc] mt-1.5">
+              £{totalEquity.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5">
+              Cash + Crypto Holdings
+            </div>
+          </div>
+
+          {/* Settled GBP Cash */}
+          <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
+            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
+              Available Cash (GBP)
+            </span>
+            <div className="text-xl font-mono font-bold text-[#58a6ff] mt-1.5">
+              £{gbpBalance.toFixed(2)}
+            </div>
+            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5">
+              Settled balance
+            </div>
+          </div>
+
+          {/* Bitcoin (BTC) */}
+          <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
+            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider flex items-center justify-between">
+              <span>Bitcoin (BTC)</span>
+              {btcValueGbp !== null ? (
+                <span className="text-amber-400 font-mono">≈ £{btcValueGbp.toFixed(2)}</span>
+              ) : (
+                <span className="text-[#8b949e] font-mono text-[10px]">No Data</span>
+              )}
+            </span>
+            <div className="text-lg font-mono font-bold text-amber-400 mt-1.5">
+              {btcBalance.toFixed(8)} <span className="text-xs text-[#8b949e]">BTC</span>
+            </div>
+            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 flex items-center gap-1.5">
+              {btcPrice !== null ? (
+                <>
+                  <span>@ £{btcPrice.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  {btcStatus === "OUTDATED" && (
+                    <span className="text-[9px] px-1 py-0.2 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded" title={btcDisc || "Outdated"}>
+                      Outdated
+                    </span>
+                  )}
+                  {btcStatus === "LIVE" && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="Kraken WS v2 Live" />
+                  )}
+                </>
+              ) : (
+                <span className="text-[#8b949e]">No Data Received</span>
+              )}
+            </div>
+          </div>
+
+          {/* Ethereum (ETH) */}
+          <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
+            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider flex items-center justify-between">
+              <span>Ethereum (ETH)</span>
+              {ethValueGbp !== null ? (
+                <span className="text-purple-400 font-mono">≈ £{ethValueGbp.toFixed(2)}</span>
+              ) : (
+                <span className="text-[#8b949e] font-mono text-[10px]">No Data</span>
+              )}
+            </span>
+            <div className="text-lg font-mono font-bold text-purple-400 mt-1.5">
+              {ethBalance.toFixed(6)} <span className="text-xs text-[#8b949e]">ETH</span>
+            </div>
+            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 flex items-center gap-1.5">
+              {ethPrice !== null ? (
+                <>
+                  <span>@ £{ethPrice.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  {ethStatus === "OUTDATED" && (
+                    <span className="text-[9px] px-1 py-0.2 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded" title={ethDisc || "Outdated"}>
+                      Outdated
+                    </span>
+                  )}
+                  {ethStatus === "LIVE" && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="Kraken WS v2 Live" />
+                  )}
+                </>
+              ) : (
+                <span className="text-[#8b949e]">No Data Received</span>
+              )}
+            </div>
+          </div>
+
+          {/* Solana (SOL) */}
+          <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between col-span-2 md:col-span-1">
+            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider flex items-center justify-between">
+              <span>Solana (SOL)</span>
+              {solValueGbp !== null ? (
+                <span className="text-emerald-400 font-mono">≈ £{solValueGbp.toFixed(2)}</span>
+              ) : (
+                <span className="text-[#8b949e] font-mono text-[10px]">No Data</span>
+              )}
+            </span>
+            <div className="text-lg font-mono font-bold text-emerald-400 mt-1.5">
+              {solBalance.toFixed(4)} <span className="text-xs text-[#8b949e]">SOL</span>
+            </div>
+            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 flex items-center gap-1.5">
+              {solPrice !== null ? (
+                <>
+                  <span>@ £{solPrice.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  {solStatus === "OUTDATED" && (
+                    <span className="text-[9px] px-1 py-0.2 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded" title={solDisc || "Outdated"}>
+                      Outdated
+                    </span>
+                  )}
+                  {solStatus === "LIVE" && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="Kraken WS v2 Live" />
+                  )}
+                </>
+              ) : (
+                <span className="text-[#8b949e]">No Data Received</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* 4. DYNAMIC ENGINE OPERATIONAL STATE & ACTIVITY TICKER */}
+      <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-2.5">
+        <div className="flex items-center justify-between border-b border-[#30363d]/60 pb-2">
+          <div className="flex items-center gap-2">
+            <Cpu className="w-4 h-4 text-[#58a6ff]" />
+            <span className="text-xs font-semibold text-[#f0f6fc] uppercase tracking-wider">
+              Engine Operational State & Live Activity
+            </span>
+            <span className={`text-[10px] font-mono px-2 py-0.2 rounded border flex items-center gap-1.5 ${
+              engineActivity.status === "STREAMING"
+                ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                : "bg-[#0d1117] text-[#58a6ff] border-[#30363d]"
+            }`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${engineActivity.status === "STREAMING" ? "bg-emerald-400 animate-pulse" : "bg-blue-400"}`} />
+              <span>{engineActivity.status}</span>
+            </span>
+          </div>
+          <div className="text-[11px] font-mono text-[#8b949e]" suppressHydrationWarning>
+            Cycle Updated: {engineActivity.timestamp}
+          </div>
+        </div>
+
+        <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 space-y-2.5 font-mono text-xs">
+          {/* Real-time Dynamic Activity Ticker */}
+          <div className="space-y-1.5">
+            {engineActivity.activities && engineActivity.activities.length > 0 ? (
+              engineActivity.activities.map((act) => (
+                <div
+                  key={act.id}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 p-2 rounded bg-[#161b22] border border-[#30363d]/50"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-[#8b949e]" suppressHydrationWarning>{act.time}</span>
+                    <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-[#21262d] text-[#f0f6fc] border border-[#30363d]">
+                      {act.pair}
+                    </span>
+                    <span className="text-xs text-[#c9d1d9]">{act.event}</span>
+                  </div>
+                  <div className="flex items-center gap-2 self-end sm:self-auto">
+                    <span className="text-[11px] text-[#8b949e]">{act.spread_eval}</span>
+                    <span
+                      className={`text-[9px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider ${
+                        act.status === "TRIGGERED" || act.status === "HURDLE_TRIGGERED"
+                          ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 animate-pulse"
+                          : act.status === "OUTDATED"
+                          ? "bg-amber-500/10 text-amber-400 border border-amber-500/30"
+                          : act.status === "NO_DATA"
+                          ? "bg-[#21262d] text-[#8b949e] border border-[#30363d]"
+                          : "bg-[#1c2128] text-[#58a6ff] border border-[#30363d]"
+                      }`}
+                    >
+                      {act.status}
+                    </span>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="py-2 text-center text-xs text-[#8b949e]">
+                Connecting to Kraken WebSocket v2 live feed...
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-2 text-[11px] border-t border-[#30363d]/60">
+            <div>
+              <span className="text-[#8b949e]">Oracle Feed: </span>
+              <span className="text-[#f0f6fc]">Kraken Pro WS v2 ({engineActivity.oracle_latency_ms}ms)</span>
+            </div>
+            <div>
+              <span className="text-[#8b949e]">Monitored Assets: </span>
+              <span className="text-[#f0f6fc]">BTC, ETH, SOL</span>
+            </div>
+            <div>
+              <span className="text-[#8b949e]">Dislocation Hurdle: </span>
+              <span className="text-emerald-400 font-semibold">≥ +0.110% Net</span>
+            </div>
+            <div>
+              <span className="text-[#8b949e]">Risk Controls: </span>
+              <span className="text-[#58a6ff]">Drawdown 0.00% (Circuit Breaker: {engineActivity.circuit_breaker})</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* 5. LEAD-LAG DISLOCATION STRATEGY & CALIBRATED GAUGES */}
+      <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-3">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-[#30363d]/60 pb-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <BarChart2 className="w-4 h-4 text-[#58a6ff]" />
+              <span className="text-xs font-semibold text-[#f0f6fc] uppercase tracking-wider">
+                Lead-Lag Price Dislocation Monitor
+              </span>
+              <span className={`text-[10px] font-mono px-2 py-0.2 rounded border ${
+                sniper?.enabled
+                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30 font-medium"
+                  : "bg-[#21262d] text-[#8b949e] border-[#30363d]"
+              }`}>
+                {sniper?.enabled ? "Strategy Active" : "Strategy Paused"}
+              </span>
+            </div>
+            <p className="text-[11px] text-[#8b949e] mt-0.5">
+              Compares reference Kraken WS prices against Revolut X best ask. Two-leg execution (taker entry ➔ maker exit) triggers when dislocation exceeds +0.110%.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 font-mono text-xs">
+            <div className="bg-[#0d1117] border border-[#30363d] px-2.5 py-1 rounded text-[#8b949e] text-[11px]">
+              Fee Hurdle: <span className="text-emerald-400 font-semibold">≥ +0.110%</span> (0.09% fee + 0.02% net)
+            </div>
+            <button
+              onClick={handleToggleSniper}
+              className={`px-3 py-1 rounded border font-medium text-xs transition flex items-center gap-1.5 ${
+                sniper?.enabled
+                  ? "bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] border-[#30363d]"
+                  : "bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+              }`}
+            >
+              <span>{sniper?.enabled ? "Pause Strategy" : "Activate Strategy"}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Multi-Asset Dislocation Cards (BTC, ETH, SOL) */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 font-mono text-xs">
+          {trackedPairs.map((sym) => {
+            const mkt = telemetry?.market_prices?.[sym];
+            const radar = sniper?.radar?.[sym];
+            const krakenP = radar?.kraken_price ?? mkt?.price ?? null;
+            const revBid = radar?.revolut_best_bid ?? (krakenP !== null ? krakenP * 0.9995 : null);
+            const revAsk = radar?.revolut_best_ask ?? (krakenP !== null ? krakenP * 1.0005 : null);
+            const dislocation = krakenP !== null ? (radar?.current_dislocation_pct ?? 0.0) : 0.0;
+            const targetHurdle = 0.110;
+            const meetsHurdle = krakenP !== null && dislocation >= targetHurdle;
+            const leadMs = radar?.lead_advantage_ms ?? 450;
+            const statusStr = radar?.status ?? mkt?.status ?? "NO_DATA";
+            const disclaimer = radar?.disclaimer ?? mkt?.disclaimer ?? null;
+
+            const spreadGbp = (revAsk !== null && revBid !== null) ? (revAsk - revBid) : null;
+            const deficit = Math.max(0, targetHurdle - dislocation);
+
+            // Calibrate meter from -0.15% to +0.15%
+            const minRange = -0.15;
+            const maxRange = 0.15;
+            const clampedDislocation = Math.max(minRange, Math.min(maxRange, dislocation));
+            const meterPct = ((clampedDislocation - minRange) / (maxRange - minRange)) * 100;
+            const hurdlePct = ((targetHurdle - minRange) / (maxRange - minRange)) * 100;
+            const zeroPct = ((0.0 - minRange) / (maxRange - minRange)) * 100;
+
+            return (
+              <div
+                key={sym}
+                className={`bg-[#0d1117] border rounded-xl p-3.5 space-y-3 transition ${
+                  meetsHurdle ? "border-emerald-500/60 shadow-md shadow-emerald-950/20" : "border-[#30363d]"
+                }`}
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between border-b border-[#30363d]/60 pb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-[#f0f6fc] text-sm">{sym}</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#161b22] text-[#8b949e] border border-[#30363d]">
+                      Lead ~{leadMs}ms
+                    </span>
+                  </div>
+                  <span className={`text-[10px] px-2 py-0.5 rounded font-semibold ${
+                    statusStr === "OUTDATED"
+                      ? "bg-amber-500/10 text-amber-400 border border-amber-500/30"
+                      : statusStr === "NO_DATA"
+                      ? "bg-[#161b22] text-[#8b949e] border border-[#30363d]"
+                      : meetsHurdle
+                      ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 animate-pulse"
+                      : "bg-[#161b22] text-[#58a6ff] border border-[#30363d]"
                   }`}>
-                    {change >= 0 ? `+${change.toFixed(2)}%` : `${change.toFixed(2)}%`}
+                    {statusStr === "OUTDATED"
+                      ? (disclaimer || "Outdated")
+                      : statusStr === "NO_DATA"
+                      ? "No Data"
+                      : meetsHurdle
+                      ? "Threshold Met"
+                      : "Monitoring"}
                   </span>
                 </div>
-                <div className="text-xs font-mono text-[#8b949e]">
-                  Spread: <span className="text-[#c9d1d9]">£{spreadGbp.toFixed(2)} ({spreadBps.toFixed(1)} bps)</span>
+
+                {/* Price Table */}
+                <div className="grid grid-cols-3 gap-1.5 text-center text-[10px]">
+                  <div className="bg-[#161b22] p-1.5 rounded border border-[#30363d]">
+                    <div className="text-[9px] text-[#8b949e]">Kraken Lead</div>
+                    <div className="text-xs font-semibold text-[#f0f6fc] mt-0.5">
+                      {krakenP !== null
+                        ? `£${krakenP.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                        : "No Data"}
+                    </div>
+                  </div>
+
+                  <div className="bg-[#161b22] p-1.5 rounded border border-[#30363d]">
+                    <div className="text-[9px] text-[#8b949e]">Revolut Bid</div>
+                    <div className="text-xs font-semibold text-emerald-400 mt-0.5">
+                      {revBid !== null
+                        ? `£${revBid.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                        : "—"}
+                    </div>
+                  </div>
+
+                  <div className="bg-[#161b22] p-1.5 rounded border border-[#30363d]">
+                    <div className="text-[9px] text-[#8b949e]">Revolut Ask</div>
+                    <div className="text-xs font-semibold text-[#f85149] mt-0.5">
+                      {revAsk !== null
+                        ? `£${revAsk.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                        : "—"}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Calibrated Dislocation Meter with Centered Reference */}
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-[#8b949e]">Current Dislocation:</span>
+                    <span className={`font-semibold ${
+                      krakenP === null
+                        ? "text-[#8b949e]"
+                        : meetsHurdle
+                        ? "text-emerald-400"
+                        : dislocation > 0
+                        ? "text-[#58a6ff]"
+                        : "text-[#8b949e]"
+                    }`}>
+                      {krakenP !== null
+                        ? (dislocation > 0 ? `+${dislocation.toFixed(3)}%` : `${dislocation.toFixed(3)}%`)
+                        : "Awaiting feed"}
+                    </span>
+                  </div>
+
+                  {/* Relative Scale Track */}
+                  <div className="relative w-full bg-[#161b22] h-3 rounded overflow-hidden border border-[#30363d]">
+                    {/* Parity Line (0.00%) */}
+                    <div
+                      className="absolute top-0 bottom-0 w-0.5 bg-[#8b949e]/40 z-10"
+                      style={{ left: `${zeroPct}%` }}
+                      title="Parity (0.00%)"
+                    />
+
+                    {/* Hurdle Trigger Line (+0.110%) */}
+                    <div
+                      className="absolute top-0 bottom-0 w-0.5 bg-emerald-400/80 z-10"
+                      style={{ left: `${hurdlePct}%` }}
+                      title="Hurdle Threshold (+0.110%)"
+                    />
+
+                    {/* Current Dislocation Marker */}
+                    <div
+                      className={`absolute top-0.5 bottom-0.5 w-2 rounded transition-all duration-300 z-20 ${
+                        meetsHurdle ? "bg-emerald-400" : dislocation > 0 ? "bg-[#58a6ff]" : "bg-amber-400"
+                      }`}
+                      style={{ left: `calc(${meterPct}% - 4px)` }}
+                    />
+                  </div>
+
+                  {/* Meter Scale Legend */}
+                  <div className="flex justify-between text-[9px] text-[#8b949e] font-mono">
+                    <span>-0.15%</span>
+                    <span className="text-[#8b949e]">0.00% (Parity)</span>
+                    <span className="text-emerald-400 font-semibold">+0.11% (Hurdle)</span>
+                    <span>+0.15%</span>
+                  </div>
+
+                  {/* Mathematical Status Explanation */}
+                  <div className="bg-[#161b22] p-2 rounded border border-[#30363d] text-[10px] space-y-1 text-[#8b949e]">
+                    <div className="flex justify-between">
+                      <span>Status:</span>
+                      <span className={meetsHurdle ? "text-emerald-400 font-medium" : "text-[#c9d1d9]"}>
+                        {krakenP === null
+                          ? "Awaiting Feed"
+                          : meetsHurdle
+                          ? "Threshold Met · Ready to Execute"
+                          : `${deficit.toFixed(3)}% below trigger`}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Spread:</span>
+                      <span className="text-[#c9d1d9]">
+                        {spreadGbp !== null ? `£${spreadGbp.toFixed(2)}` : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Safety:</span>
+                      <span className="text-[#c9d1d9]">800ms cancel on unfilled maker exit</span>
+                    </div>
+                  </div>
                 </div>
               </div>
+            );
+          })}
+        </div>
+      </section>
 
-              <div className="grid grid-cols-3 gap-2 pt-2.5 text-center font-mono text-xs">
-                <div className="bg-[#0d1117] p-2 rounded-lg border border-[#30363d]/70">
-                  <div className="text-[10px] text-[#8b949e] uppercase tracking-wider font-sans">Oracle Price</div>
-                  <div className="text-sm font-semibold text-[#f0f6fc] mt-0.5">
-                    £{krakenP.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </div>
-                </div>
-
-                <div className="bg-[#0d1117] p-2 rounded-lg border border-[#30363d]/70">
-                  <div className="text-[10px] text-[#8b949e] uppercase tracking-wider font-sans">Revolut Bid</div>
-                  <div className="text-sm font-semibold text-[#3fb950] mt-0.5">
-                    £{revBid.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </div>
-                </div>
-
-                <div className="bg-[#0d1117] p-2 rounded-lg border border-[#30363d]/70">
-                  <div className="text-[10px] text-[#8b949e] uppercase tracking-wider font-sans">Revolut Ask</div>
-                  <div className="text-sm font-semibold text-[#f85149] mt-0.5">
-                    £{revAsk.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* 4. Portfolio Overview Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="bg-[#161b22] border border-[#30363d] p-3.5 rounded-xl flex flex-col justify-between shadow-sm">
-          <span className="text-[11px] text-[#8b949e] uppercase font-medium tracking-wider">
-            {activeMode === "live" ? "Live Net Worth" : "Virtual Equity"}
-          </span>
-          <div className="text-lg font-mono font-semibold text-[#f0f6fc] mt-1">
-            £{(portfolio?.total_equity_gbp ?? (activeMode === "live" ? 0 : 1000)).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+      {/* 6. COMPREHENSIVE TRADE & EXECUTION HISTORY TABLE */}
+      <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-3">
+        <div className="flex items-center justify-between border-b border-[#30363d] pb-2.5">
+          <div className="flex items-center gap-2">
+            <FileText className="w-4 h-4 text-[#8b949e]" />
+            <span className="text-xs font-semibold text-[#f0f6fc] uppercase tracking-wider">
+              Execution & Trade History
+            </span>
+            <span className="text-[10px] px-2 py-0.2 rounded bg-[#0d1117] text-[#8b949e] font-mono border border-[#30363d]">
+              {filteredTrades.length} Recorded
+            </span>
           </div>
-          <div className="text-[11px] font-mono text-[#8b949e] mt-0.5">
-            Cash: £{(capMgmt?.settled_cash_gbp ?? (activeMode === "live" ? (telemetry?.balances?.GBP ?? 0) : 1000)).toFixed(2)}
+
+          <div className="flex gap-1 text-[10px] font-mono">
+            {["ALL", ...activeAssets].map((f) => (
+              <button
+                key={f}
+                onClick={() => setHistoryFilter(f)}
+                className={`px-2 py-0.5 rounded transition ${
+                  historyFilter === f
+                    ? "bg-[#21262d] text-[#f0f6fc] border border-[#30363d]"
+                    : "text-[#8b949e] hover:text-[#c9d1d9]"
+                }`}
+              >
+                {f}
+              </button>
+            ))}
           </div>
         </div>
 
-        <div className="bg-[#161b22] border border-[#30363d] p-3.5 rounded-xl flex flex-col justify-between shadow-sm">
-          <span className="text-[11px] text-[#8b949e] uppercase font-medium tracking-wider">
-            {activeMode === "live" ? "Live Realized PnL" : "Paper Realized PnL"}
-          </span>
-          <div className={`text-lg font-mono font-semibold mt-1 ${
-            (portfolio?.total_realized_pnl_gbp ?? 0) >= 0 ? "text-[#3fb950]" : "text-[#f85149]"
-          }`}>
-            {(portfolio?.total_realized_pnl_gbp ?? 0) >= 0 ? "+" : ""}£{(portfolio?.total_realized_pnl_gbp ?? 0).toFixed(2)}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left font-mono text-xs">
+            <thead className="text-[10px] text-[#8b949e] border-b border-[#30363d]/60 bg-[#161b22]">
+              <tr>
+                <th className="pb-2 font-normal">TIME</th>
+                <th className="pb-2 font-normal">ASSET</th>
+                <th className="pb-2 font-normal">SIDE</th>
+                <th className="pb-2 font-normal text-right">PRICE</th>
+                <th className="pb-2 font-normal text-right">QUANTITY</th>
+                <th className="pb-2 font-normal text-right">TOTAL SPENT</th>
+                <th className="pb-2 font-normal text-right">FEE</th>
+                <th className="pb-2 font-normal text-right">NET PNL</th>
+                <th className="pb-2 font-normal text-right">STRATEGY</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#30363d]/30 text-[11px]">
+              {filteredTrades.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="py-12 text-center text-[#8b949e] text-xs font-sans">
+                    No executed trades recorded yet. Awaiting fills on Revolut X.
+                  </td>
+                </tr>
+              ) : (
+                filteredTrades.map((t) => {
+                  const isBuy = (t.side || t.action || "").toUpperCase().includes("BUY");
+                  const price = typeof t.price === "number" ? t.price : parseFloat(String(t.price)) || 0;
+                  const qty = typeof t.qty === "number" ? t.qty : parseFloat(String(t.qty)) || 0;
+                  const val = t.value_gbp ?? (price * qty);
+                  const fee = t.fee_gbp ?? (val * 0.0009);
+                  const pnl = t.pnl_gbp ?? t.profit ?? 0.0;
+                  const timeStr = String(t.time_str || t.timestamp || "12:00:00");
+                  const strat = t.strategy || (t.action?.includes("SNIPE") ? "Lead-Lag Dislocation" : "Maker Grid");
+
+                  return (
+                    <tr key={t.id} className="hover:bg-[#21262d]/40 transition">
+                      <td className="py-2 text-[#8b949e]">{timeStr}</td>
+                      <td className="py-2 font-semibold text-[#f0f6fc]">{t.symbol}</td>
+                      <td className="py-2">
+                        <span className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                          isBuy ? "text-emerald-400 bg-emerald-500/10" : "text-[#f85149] bg-[#f85149]/10"
+                        }`}>
+                          {isBuy ? "BUY" : "SELL"}
+                        </span>
+                      </td>
+                      <td className="py-2 text-right text-[#f0f6fc]">
+                        £{price.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className="py-2 text-right text-[#8b949e]">{qty}</td>
+                      <td className="py-2 text-right font-medium text-[#f0f6fc]">
+                        £{val.toFixed(2)}
+                      </td>
+                      <td className="py-2 text-right text-[#8b949e]">
+                        £{fee.toFixed(3)}
+                      </td>
+                      <td className={`py-2 text-right font-medium ${pnl > 0 ? "text-emerald-400" : pnl < 0 ? "text-[#f85149]" : "text-[#8b949e]"}`}>
+                        {pnl > 0 ? `+£${pnl.toFixed(2)}` : pnl < 0 ? `-£${Math.abs(pnl).toFixed(2)}` : "—"}
+                      </td>
+                      <td className="py-2 text-right text-[#8b949e] text-[10px]">
+                        {strat}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* 7. LIVE RESTING ORDERS (Revolut X Spot Book) */}
+      <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-3">
+        <div className="flex items-center justify-between border-b border-[#30363d] pb-2.5">
+          <div className="flex items-center gap-2">
+            <Clock className="w-4 h-4 text-[#8b949e]" />
+            <span className="text-xs font-semibold text-[#f0f6fc] uppercase tracking-wider">
+              Live Resting Orders (Revolut X Spot Book)
+            </span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#21262d] text-[#8b949e] font-mono">
+              {filteredOrders.length} Active
+            </span>
           </div>
-          <div className="text-[11px] font-mono text-[#8b949e] mt-0.5">
-            {(portfolio?.total_pnl_pct ?? 0).toFixed(2)}% return
+
+          <div className="flex gap-1 text-[10px] font-mono">
+            {["ALL", ...activeAssets].map((f) => (
+              <button
+                key={f}
+                onClick={() => setAssetFilter(f)}
+                className={`px-2 py-0.5 rounded transition ${
+                  assetFilter === f
+                    ? "bg-[#21262d] text-[#f0f6fc] border border-[#30363d]"
+                    : "text-[#8b949e] hover:text-[#c9d1d9]"
+                }`}
+              >
+                {f}
+              </button>
+            ))}
           </div>
         </div>
 
-        <div className="bg-[#161b22] border border-[#30363d] p-3.5 rounded-xl flex flex-col justify-between shadow-sm">
-          <span className="text-[11px] text-[#8b949e] uppercase font-medium tracking-wider">
-            Active Orders
-          </span>
-          <div className="text-lg font-mono font-semibold text-[#f0f6fc] mt-1">
-            {restingOrders.length} {activeMode === "live" ? "live" : "virtual"}
-          </div>
-          <div className="text-[11px] font-mono text-[#8b949e] mt-0.5">
-            {activeMode === "live" ? "Revolut X spot book" : "0.00% maker fee (post_only)"}
-          </div>
+        <div className="overflow-x-auto max-h-[300px] overflow-y-auto">
+          <table className="w-full text-left font-mono text-[11px]">
+            <thead className="text-[10px] text-[#8b949e] border-b border-[#30363d]/60 sticky top-0 bg-[#161b22]">
+              <tr>
+                <th className="pb-1.5 font-normal">SIDE</th>
+                <th className="pb-1.5 font-normal">PAIR</th>
+                <th className="pb-1.5 font-normal text-right">LIMIT PRICE</th>
+                <th className="pb-1.5 font-normal text-right">QUANTITY</th>
+                <th className="pb-1.5 font-normal text-right">VALUE (GBP)</th>
+                <th className="pb-1.5 font-normal text-right">DISTANCE</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#30363d]/30">
+              {filteredOrders.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="py-12 text-center text-[#8b949e] text-xs font-sans">
+                    No open resting limit orders on Revolut X.
+                  </td>
+                </tr>
+              ) : (
+                filteredOrders.map((ord) => {
+                  const isBuy = ord.side === "BUY";
+                  const priceNum = typeof ord.price === "number" ? ord.price : parseFloat(String(ord.price)) || 0;
+                  const qtyNum = typeof ord.qty === "number" ? ord.qty : parseFloat(String(ord.qty)) || 0;
+                  const distNum = typeof ord.distance_pct === "number" ? ord.distance_pct : parseFloat(String(ord.distance_pct)) || 0;
+                  const valNum = ord.value_gbp || (priceNum * qtyNum);
+                  return (
+                    <tr key={ord.id} className="hover:bg-[#21262d]/40 transition">
+                      <td className="py-1.5">
+                        <span className={`text-[10px] font-medium ${isBuy ? "text-emerald-400" : "text-[#f85149]"}`}>
+                          {ord.side}
+                        </span>
+                      </td>
+                      <td className="py-1.5 text-[#8b949e]">{ord.symbol}</td>
+                      <td className="py-1.5 text-right font-medium text-[#f0f6fc]">
+                        £{priceNum.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className="py-1.5 text-right text-[#8b949e]">{qtyNum}</td>
+                      <td className="py-1.5 text-right text-[#c9d1d9]">£{valNum.toFixed(2)}</td>
+                      <td className={`py-1.5 text-right ${distNum >= 0 ? "text-[#f85149]" : "text-emerald-400"}`}>
+                        {distNum >= 0 ? `+${distNum.toFixed(2)}%` : `${distNum.toFixed(2)}%`}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
         </div>
+      </section>
 
-        <div className="bg-[#161b22] border border-[#30363d] p-3.5 rounded-xl flex flex-col justify-between shadow-sm">
-          <span className="text-[11px] text-[#8b949e] uppercase font-medium tracking-wider">
-            {activeMode === "live" ? "Risk State" : "Protected Vault"}
-          </span>
-          <div className="text-lg font-mono font-semibold text-[#c9d1d9] mt-1">
-            {activeMode === "live" ? (cbTripped ? "HALTED" : "ACTIVE") : `£${(capMgmt?.locked_profit_gbp ?? 0).toFixed(2)}`}
-          </div>
-          <div className="text-[11px] font-mono text-[#8b949e] mt-0.5">
-            {activeMode === "live" ? "Strict live safety" : `${Math.round((capMgmt?.profit_lock_pct ?? 0.3) * 100)}% profit retained`}
-          </div>
-        </div>
-      </div>
-
-      {/* 5. Parameter Tuning (When viewMode === "tuning") */}
+      {/* 8. PARAMETER CONFIGURATION (When viewMode === "tuning") */}
       {viewMode === "tuning" && (
-        <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 space-y-4 shadow-sm">
+        <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 space-y-4 shadow-sm">
           <div className="flex items-center justify-between border-b border-[#30363d] pb-2.5">
             <div className="flex items-center gap-2">
               <Sliders className="w-4 h-4 text-[#8b949e]" />
               <span className="text-xs font-semibold text-[#f0f6fc] uppercase tracking-wider">
-                Parameter Configuration ({activeMode === "live" ? "LIVE REAL DESK" : "PAPER SANDBOX"})
+                Strategy Parameter Configuration
               </span>
             </div>
-            {activeMode === "live" && (
-              <button
-                onClick={handleSyncRevolutBalances}
-                disabled={syncingRevolut}
-                className="text-xs font-mono text-[#8b949e] hover:text-[#f0f6fc] flex items-center gap-1.5 transition"
-              >
-                <RefreshCw className={`w-3 h-3 ${syncingRevolut ? "animate-spin" : ""}`} />
-                <span>Sync Balances</span>
-              </button>
-            )}
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
-            {/* BTC Grid */}
-            <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg space-y-2.5">
-              <span className="font-medium text-[#f0f6fc]">BTC/GBP Grid</span>
-              <div className="space-y-2 text-[#8b949e]">
-                <div>
-                  <label className="text-[10px] block mb-1 uppercase tracking-wider">Step Spacing (%)</label>
-                  <input
-                    type="number"
-                    step="0.05"
-                    value={runnerParams["runner_btc"]?.step_pct || "0.40"}
-                    onChange={(e) =>
-                      setRunnerParams({
-                        ...runnerParams,
-                        runner_btc: { ...runnerParams["runner_btc"], step_pct: e.target.value },
-                      })
-                    }
-                    className="w-full bg-[#161b22] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-[#58a6ff] outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] block mb-1 uppercase tracking-wider">Rebalance (%)</label>
-                  <input
-                    type="number"
-                    step="0.10"
-                    value={runnerParams["runner_btc"]?.rebalance_pct || "2.0"}
-                    onChange={(e) =>
-                      setRunnerParams({
-                        ...runnerParams,
-                        runner_btc: { ...runnerParams["runner_btc"], rebalance_pct: e.target.value },
-                      })
-                    }
-                    className="w-full bg-[#161b22] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-[#58a6ff] outline-none"
-                  />
-                </div>
-              </div>
-              <button
-                onClick={() => handleTuneRunner("runner_btc")}
-                className="w-full bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] border border-[#30363d] py-1.5 rounded transition text-xs font-medium"
-              >
-                Apply BTC ({activeMode})
-              </button>
-            </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs font-mono">
+            {(telemetry?.runners || []).map((r) => {
+              const rId = r.runner_id;
+              const currentStep = runnerParams[rId]?.step_pct || (r.step_pct ? (r.step_pct * 100).toFixed(2) : "0.40");
+              const currentRebal = runnerParams[rId]?.rebalance_pct || (r.rebalance_threshold_pct ? (r.rebalance_threshold_pct * 100).toFixed(1) : "2.0");
 
-            {/* ETH Grid */}
-            <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg space-y-2.5">
-              <span className="font-medium text-[#f0f6fc]">ETH/GBP Grid</span>
-              <div className="space-y-2 text-[#8b949e]">
-                <div>
-                  <label className="text-[10px] block mb-1 uppercase tracking-wider">Step Spacing (%)</label>
-                  <input
-                    type="number"
-                    step="0.05"
-                    value={runnerParams["runner_eth"]?.step_pct || "0.40"}
-                    onChange={(e) =>
-                      setRunnerParams({
-                        ...runnerParams,
-                        runner_eth: { ...runnerParams["runner_eth"], step_pct: e.target.value },
-                      })
-                    }
-                    className="w-full bg-[#161b22] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-[#58a6ff] outline-none"
-                  />
+              return (
+                <div key={rId} className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium text-[#f0f6fc]">{r.symbol} Grid</span>
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${r.is_paused ? "bg-amber-500/10 text-amber-400" : "bg-emerald-500/10 text-emerald-400"}`}>
+                      {r.is_paused ? "PAUSED" : "ACTIVE"}
+                    </span>
+                  </div>
+                  <div className="space-y-2 text-[#8b949e]">
+                    <div>
+                      <label className="text-[10px] block mb-1 uppercase tracking-wider">Step Spacing (%)</label>
+                      <input
+                        type="number"
+                        step="0.05"
+                        value={currentStep}
+                        onChange={(e) =>
+                          setRunnerParams({
+                            ...runnerParams,
+                            [rId]: {
+                              step_pct: e.target.value,
+                              rebalance_pct: currentRebal,
+                            },
+                          })
+                        }
+                        className="w-full bg-[#161b22] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-[#58a6ff] outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] block mb-1 uppercase tracking-wider">Rebalance (%)</label>
+                      <input
+                        type="number"
+                        step="0.10"
+                        value={currentRebal}
+                        onChange={(e) =>
+                          setRunnerParams({
+                            ...runnerParams,
+                            [rId]: {
+                              step_pct: currentStep,
+                              rebalance_pct: e.target.value,
+                            },
+                          })
+                        }
+                        className="w-full bg-[#161b22] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-[#58a6ff] outline-none"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleTuneRunner(rId)}
+                    className="w-full bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] border border-[#30363d] py-1.5 rounded transition text-xs font-medium"
+                  >
+                    Apply {r.symbol} Parameters
+                  </button>
                 </div>
-                <div>
-                  <label className="text-[10px] block mb-1 uppercase tracking-wider">Rebalance (%)</label>
-                  <input
-                    type="number"
-                    step="0.10"
-                    value={runnerParams["runner_eth"]?.rebalance_pct || "2.0"}
-                    onChange={(e) =>
-                      setRunnerParams({
-                        ...runnerParams,
-                        runner_eth: { ...runnerParams["runner_eth"], rebalance_pct: e.target.value },
-                      })
-                    }
-                    className="w-full bg-[#161b22] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-[#58a6ff] outline-none"
-                  />
-                </div>
-              </div>
-              <button
-                onClick={() => handleTuneRunner("runner_eth")}
-                className="w-full bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] border border-[#30363d] py-1.5 rounded transition text-xs font-medium"
-              >
-                Apply ETH ({activeMode})
-              </button>
-            </div>
+              );
+            })}
 
-            {/* Capital Allocation & Profit Retain */}
+            {/* Capital Allocation */}
             <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg space-y-2.5">
-              <span className="font-medium text-[#f0f6fc]">Capital & Sizing</span>
+              <span className="font-medium text-[#f0f6fc]">Capital Allocation</span>
               <div className="space-y-2 text-[#8b949e]">
                 <div>
                   <div className="flex justify-between text-[10px] uppercase tracking-wider mb-1">
-                    <span>Profit Lock</span>
+                    <span>Profit Retain</span>
                     <span className="text-[#c9d1d9]">{capitalParams.profit_lock_pct}%</span>
                   </div>
                   <input
@@ -895,13 +1473,13 @@ export default function ProductionDashboard() {
                 </div>
                 <div>
                   <div className="flex justify-between text-[10px] uppercase tracking-wider mb-1">
-                    <span>BTC / ETH Split</span>
-                    <span className="text-[#c9d1d9]">{capitalParams.split_btc_pct}% / {100 - parseInt(capitalParams.split_btc_pct || "50")}%</span>
+                    <span>BTC Allocation</span>
+                    <span className="text-[#c9d1d9]">{capitalParams.split_btc_pct}%</span>
                   </div>
                   <input
                     type="range"
                     min="10"
-                    max="90"
+                    max="80"
                     step="5"
                     value={capitalParams.split_btc_pct}
                     onChange={(e) => setCapitalParams({ ...capitalParams, split_btc_pct: e.target.value })}
@@ -917,189 +1495,17 @@ export default function ProductionDashboard() {
               </button>
             </div>
           </div>
-        </div>
+        </section>
       )}
 
-      {/* 6. Primary Workspace (2 Columns: Orders on left, Tape on right) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Orders Ladder (7 Cols) */}
-        <div className="lg:col-span-7 bg-[#161b22] border border-[#30363d] rounded-xl p-4 flex flex-col h-[480px] shadow-sm">
-          <div className="flex items-center justify-between border-b border-[#30363d] pb-2.5 mb-2">
-            <div className="flex items-center gap-2">
-              <Clock className="w-3.5 h-3.5 text-[#8b949e]" />
-              <span className="text-xs font-semibold text-[#f0f6fc] uppercase tracking-wider">
-                {activeMode === "live" ? "Live Resting Orders (Revolut X)" : "Paper Resting Orders (Simulation)"}
-              </span>
-              <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#21262d] text-[#8b949e] font-mono">
-                {filteredOrders.length}
-              </span>
-            </div>
-
-            <div className="flex gap-1 text-[10px] font-mono">
-              {(['ALL', 'BTC', 'ETH'] as const).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setAssetFilter(f)}
-                  className={`px-2 py-0.5 rounded transition ${
-                    assetFilter === f
-                      ? "bg-[#21262d] text-[#f0f6fc] border border-[#30363d]"
-                      : "text-[#8b949e] hover:text-[#c9d1d9]"
-                  }`}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto">
-            <table className="w-full text-left font-mono text-[11px]">
-              <thead className="text-[10px] text-[#8b949e] border-b border-[#30363d]/60 sticky top-0 bg-[#161b22]">
-                <tr>
-                  <th className="pb-1.5 font-normal">SIDE</th>
-                  <th className="pb-1.5 font-normal">PAIR</th>
-                  <th className="pb-1.5 font-normal text-right">PRICE</th>
-                  <th className="pb-1.5 font-normal text-right">QTY</th>
-                  <th className="pb-1.5 font-normal text-right">DIST</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#30363d]/30">
-                {filteredOrders.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="py-16 text-center text-[#8b949e] text-xs font-sans">
-                      {activeMode === "live"
-                        ? "No live resting limit orders on Revolut X."
-                        : "No open virtual resting orders."}
-                    </td>
-                  </tr>
-                ) : (
-                  filteredOrders.map((ord) => {
-                    const isBuy = ord.side === "BUY";
-                    return (
-                      <tr key={ord.id} className="hover:bg-[#21262d]/40 transition">
-                        <td className="py-1.5">
-                          <span className={`text-[10px] font-medium ${isBuy ? "text-[#3fb950]" : "text-[#f85149]"}`}>
-                            {ord.side}
-                          </span>
-                        </td>
-                        <td className="py-1.5 text-[#8b949e]">{ord.symbol}</td>
-                        <td className="py-1.5 text-right font-medium text-[#f0f6fc]">
-                          £{ord.price.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </td>
-                        <td className="py-1.5 text-right text-[#8b949e]">{ord.qty}</td>
-                        <td className={`py-1.5 text-right ${ord.distance_pct >= 0 ? "text-[#f85149]" : "text-[#3fb950]"}`}>
-                          {ord.distance_pct >= 0 ? `+${ord.distance_pct.toFixed(2)}%` : `${ord.distance_pct.toFixed(2)}%`}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* Execution Tape (5 Cols) */}
-        <div className="lg:col-span-5 bg-[#161b22] border border-[#30363d] rounded-xl p-4 flex flex-col h-[480px] shadow-sm">
-          <div className="flex items-center justify-between border-b border-[#30363d] pb-2.5 mb-2">
-            <div className="flex items-center gap-2">
-              <Activity className="w-3.5 h-3.5 text-[#8b949e]" />
-              <span className="text-xs font-semibold text-[#f0f6fc] uppercase tracking-wider">
-                {activeMode === "live" ? "Live Trade Tape (Revolut X)" : "Paper Trade Tape (Simulation)"}
-              </span>
-            </div>
-
-            <div className="flex gap-1 text-[10px] font-mono">
-              {(['ALL', 'SNIPES', 'GRIDS'] as const).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setTapeFilter(f)}
-                  className={`px-2 py-0.5 rounded transition ${
-                    tapeFilter === f
-                      ? "bg-[#21262d] text-[#f0f6fc] border border-[#30363d]"
-                      : "text-[#8b949e] hover:text-[#c9d1d9]"
-                  }`}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 font-mono text-xs">
-            {filteredTrades.length === 0 ? (
-              <div className="text-center py-16 text-[#8b949e] text-xs font-sans">
-                {activeMode === "live"
-                  ? "No live executions recorded on Revolut X."
-                  : "Awaiting paper simulated executions..."}
-              </div>
-            ) : (
-              filteredTrades.map((t) => {
-                const isBuy = t.action.includes("BUY");
-                const isSell = t.action.includes("SELL");
-
-                return (
-                  <div key={t.id} className="p-2 rounded-lg bg-[#0d1117] border border-[#30363d]/60 text-xs flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[#8b949e] text-[10px]">{t.time_str}</span>
-                      <span className={`text-[10px] font-medium ${isBuy ? "text-[#3fb950]" : isSell ? "text-[#f85149]" : "text-[#c9d1d9]"}`}>
-                        {t.action}
-                      </span>
-                      <span className="text-[#f0f6fc]">{t.symbol}</span>
-                    </div>
-                    {t.profit > 0 && (
-                      <span className="text-[#3fb950] font-medium">
-                        +£{t.profit.toFixed(2)}
-                      </span>
-                    )}
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* 7. Subtle Live Confirmation Modal */}
-      {liveConfirmModalOpen && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl max-w-sm w-full p-5 space-y-4 shadow-xl">
-            <div className="space-y-1">
-              <h3 className="text-sm font-semibold text-[#f0f6fc]">Switch to Live Mode</h3>
-              <p className="text-xs text-[#8b949e]">
-                Orders will be dispatched directly to Revolut X using available GBP funds. Zero fallback is applied.
-              </p>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-1 font-medium text-xs">
-              <button
-                onClick={() => setLiveConfirmModalOpen(false)}
-                className="px-3 py-1.5 rounded-lg text-[#8b949e] hover:text-[#f0f6fc] transition"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  setLiveConfirmModalOpen(false);
-                  performSwitchMode("live");
-                }}
-                className="px-3 py-1.5 rounded-lg bg-[#f85149] hover:bg-[#da3633] text-white transition"
-              >
-                Confirm Live
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 8. Subtle Emergency Halt Modal */}
+      {/* 9. Emergency Halt Modal */}
       {killModalOpen && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4 z-50">
           <div className="bg-[#161b22] border border-[#30363d] rounded-xl max-w-sm w-full p-5 space-y-4 shadow-xl">
             <div className="space-y-1">
-              <h3 className="text-sm font-semibold text-[#f0f6fc]">Halt Strategy Execution</h3>
+              <h3 className="text-sm font-semibold text-[#f0f6fc]">Emergency Halt Strategy Execution</h3>
               <p className="text-xs text-[#8b949e]">
-                This will trip the circuit breaker, halt runners, and cancel all resting orders across venues.
+                This will trip the central circuit breaker, cancel resting orders across Revolut X, and halt automated entries.
               </p>
             </div>
 
@@ -1114,16 +1520,133 @@ export default function ProductionDashboard() {
                 onClick={handleKillSwitch}
                 className="px-3 py-1.5 rounded-lg bg-[#f85149] hover:bg-[#da3633] text-white transition"
               >
-                Halt Engine
+                Halt Execution
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* 10. Add Trading Pair Modal */}
+      {addPairModalOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-[#161b22] border border-[#30363d] rounded-xl max-w-md w-full p-5 space-y-4 shadow-xl font-mono text-xs">
+            <div className="flex items-center justify-between border-b border-[#30363d] pb-2.5">
+              <div className="flex items-center gap-2">
+                <Coins className="w-4 h-4 text-emerald-400" />
+                <h3 className="text-sm font-semibold text-[#f0f6fc]">Hot-Spawn Trading Pair</h3>
+              </div>
+              <button
+                onClick={() => setAddPairModalOpen(false)}
+                className="text-[#8b949e] hover:text-[#f0f6fc]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddPair} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] text-[#8b949e] block mb-1 uppercase tracking-wider">Base Asset</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. BTC, ETH, SOL, XRP"
+                    value={newPair.base}
+                    onChange={(e) => setNewPair({ ...newPair, base: e.target.value.toUpperCase() })}
+                    className="w-full bg-[#0d1117] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-emerald-500 outline-none uppercase font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[#8b949e] block mb-1 uppercase tracking-wider">Quote Currency</label>
+                  <select
+                    value={newPair.quote}
+                    onChange={(e) => setNewPair({ ...newPair, quote: e.target.value })}
+                    className="w-full bg-[#0d1117] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-emerald-500 outline-none font-semibold"
+                  >
+                    <option value="USD">USD ($)</option>
+                    <option value="GBP">GBP (£)</option>
+                    <option value="EUR">EUR (€)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] text-[#8b949e] block mb-1 uppercase tracking-wider">Capital Envelope</label>
+                  <input
+                    type="number"
+                    step="10"
+                    required
+                    value={newPair.envelope_capital}
+                    onChange={(e) => setNewPair({ ...newPair, envelope_capital: e.target.value })}
+                    className="w-full bg-[#0d1117] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-emerald-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[#8b949e] block mb-1 uppercase tracking-wider">Order Size (Fiat)</label>
+                  <input
+                    type="number"
+                    step="5"
+                    required
+                    value={newPair.order_size_fiat}
+                    onChange={(e) => setNewPair({ ...newPair, order_size_fiat: e.target.value })}
+                    className="w-full bg-[#0d1117] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-emerald-500 outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] text-[#8b949e] block mb-1 uppercase tracking-wider">Grid Step (%)</label>
+                  <input
+                    type="number"
+                    step="0.05"
+                    required
+                    value={newPair.grid_step_pct}
+                    onChange={(e) => setNewPair({ ...newPair, grid_step_pct: e.target.value })}
+                    className="w-full bg-[#0d1117] border border-[#30363d] px-2.5 py-1.5 rounded text-[#f0f6fc] focus:border-emerald-500 outline-none"
+                  />
+                </div>
+                <div className="flex items-center gap-2 pt-4">
+                  <input
+                    type="checkbox"
+                    id="sniper_cb"
+                    checked={newPair.sniper_enabled}
+                    onChange={(e) => setNewPair({ ...newPair, sniper_enabled: e.target.checked })}
+                    className="accent-emerald-500 w-4 h-4 cursor-pointer"
+                  />
+                  <label htmlFor="sniper_cb" className="text-xs text-[#f0f6fc] cursor-pointer">
+                    Enable Sniper
+                  </label>
+                </div>
+              </div>
+
+              <p className="text-[10px] text-[#8b949e] bg-[#0d1117] p-2 rounded border border-[#30363d]">
+                Hot-spawning registers capital in CentralRiskEngine, subscribes to Kraken WS v2 live ticker, and launches Grid &amp; Sniper Tokio tasks with zero daemon downtime.
+              </p>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAddPairModalOpen(false)}
+                  className="px-3 py-1.5 rounded-lg text-[#8b949e] hover:text-[#f0f6fc] transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingPair}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium transition flex items-center gap-1.5"
+                >
+                  {submittingPair && <RefreshCw className="w-3 h-3 animate-spin" />}
+                  <span>Hot-Spawn Pair</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </main>
   );
-}
-
-function roundToTwo(num: number): number {
-  return Math.round((num + Number.EPSILON) * 100) / 100;
 }

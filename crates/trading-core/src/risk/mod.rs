@@ -269,4 +269,8 @@ impl CentralRiskEngine {
     pub async fn trip_circuit_breaker(&self, reason: &str) {
         self.circuit_breaker.lock().await.trip(reason);
     }
+
+    pub async fn reset_circuit_breaker(&self, current_equity: Decimal) {
+        self.circuit_breaker.lock().await.reset(current_equity);
+    }
 }

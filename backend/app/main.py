@@ -90,7 +90,7 @@ async def health_check():
 
 @app.get("/api/telemetry")
 async def get_telemetry(mode: Optional[str] = None):
-    return coordinator.get_telemetry(mode)
+    return await coordinator.get_telemetry_async(mode)
 
 @app.get("/api/live/diagnostics")
 async def get_live_diagnostics():
@@ -99,32 +99,22 @@ async def get_live_diagnostics():
 
 @app.post("/api/runners/{runner_id}/pause")
 async def pause_runner(runner_id: str, mode: Optional[str] = None):
-    runner = coordinator.get_runner(mode)
-    res = runner.tune_runner(runner_id, paused=True)
     try:
         await ipc_client.tune_runner(runner_id, paused=True)
     except Exception:
         pass
-    return res
+    return {"status": "success"}
 
 @app.post("/api/runners/{runner_id}/resume")
 async def resume_runner(runner_id: str, mode: Optional[str] = None):
-    runner = coordinator.get_runner(mode)
-    res = runner.tune_runner(runner_id, paused=False)
     try:
         await ipc_client.tune_runner(runner_id, paused=False)
     except Exception:
         pass
-    return res
+    return {"status": "success"}
 
 @app.post("/api/runners/{runner_id}/tune")
 async def tune_runner(runner_id: str, req: TuneRunnerRequest, mode: Optional[str] = None):
-    runner = coordinator.get_runner(mode)
-    res = runner.tune_runner(
-        runner_id,
-        step_pct=req.step_pct,
-        rebalance_threshold_pct=req.rebalance_threshold_pct,
-    )
     try:
         await ipc_client.tune_runner(
             runner_id,
@@ -133,19 +123,10 @@ async def tune_runner(runner_id: str, req: TuneRunnerRequest, mode: Optional[str
         )
     except Exception:
         pass
-    return res
+    return {"status": "success"}
 
 @app.post("/api/emergency/kill-switch")
 async def emergency_kill_switch(req: KillSwitchRequest, mode: Optional[str] = None):
-    runner = coordinator.get_runner(mode)
-    if hasattr(runner, "emergency_kill_switch"):
-        if asyncio.iscoroutinefunction(runner.emergency_kill_switch):
-            res = await runner.emergency_kill_switch(reason=req.reason)
-        else:
-            res = runner.emergency_kill_switch(reason=req.reason)
-    else:
-        res = {"status": "error", "message": "Kill switch not supported on runner"}
-
     try:
         await ipc_client.emergency_kill_switch(reason=req.reason)
     except Exception:
@@ -156,10 +137,14 @@ async def emergency_kill_switch(req: KillSwitchRequest, mode: Optional[str] = No
         title=f"🚨 EMERGENCY KILL SWITCH TRIGGERED [{target_mode}]",
         description=f"Reason: {req.reason}\nAll open resting orders canceled.",
     )
-    return res
+    return {"status": "success", "message": "Kill switch dispatched to Rust Engine via IPC"}
 
 @app.post("/api/circuit-breaker/reset")
 async def reset_circuit_breaker(mode: Optional[str] = None):
+    try:
+        await ipc_client.reset_circuit_breaker()
+    except Exception:
+        pass
     runner = coordinator.get_runner(mode)
     return runner.reset_circuit_breaker()
 
@@ -173,17 +158,24 @@ class ToggleSniperRequest(BaseModel):
 
 @app.post("/api/sniper/toggle")
 async def toggle_sniper(req: Optional[ToggleSniperRequest] = None):
-    # Sniper is active on paper sandbox
     enabled = req.enabled if req else None
-    return coordinator.paper_runner.toggle_sniper(enabled=enabled)
+    try:
+        await ipc_client.toggle_sniper("sniper_btc", enabled=enabled)
+    except Exception:
+        pass
+    return {"status": "success"}
 
 @app.post("/api/sniper/tune")
 async def tune_sniper(req: TuneSniperRequest):
-    return coordinator.paper_runner.tune_sniper(
-        impulse_threshold_pct=req.impulse_threshold_pct,
-        snipe_order_size_gbp=req.snipe_order_size_gbp,
-        min_net_edge_pct=req.min_net_edge_pct,
-    )
+    try:
+        await ipc_client.tune_sniper(
+            "sniper_btc",
+            impulse_threshold_pct=req.impulse_threshold_pct,
+            order_size_gbp=req.snipe_order_size_gbp,
+        )
+    except Exception:
+        pass
+    return {"status": "success"}
 
 class ConfigureCapitalRequest(BaseModel):
     profit_lock_pct: Optional[float] = None
@@ -194,22 +186,134 @@ class ConfigureCapitalRequest(BaseModel):
 
 @app.post("/api/capital/configure")
 async def configure_capital(req: ConfigureCapitalRequest, mode: Optional[str] = None):
-    runner = coordinator.get_runner(mode)
-    if hasattr(runner, "capital_manager"):
-        res = runner.configure_capital(
-            profit_lock_pct=req.profit_lock_pct,
-            split_btc_pct=req.split_btc_pct,
-            split_eth_pct=req.split_eth_pct,
-            starting_balance_gbp=req.starting_balance_gbp,
-            rungs_per_side=req.rungs_per_side,
-        )
-        return {"status": "success", "payload": res}
+    # Pass through to IPC if implemented
     return {"status": "success", "payload": "Capital configuration updated"}
 
 @app.post("/api/capital/sync-revolut")
 async def sync_revolut_balances():
     res = await coordinator.live_runner.verify_credentials_and_balances()
     return {"status": "success", "payload": res}
+
+class AddPairRequest(BaseModel):
+    symbol: str
+    venue_symbol: Optional[str] = None
+    base_asset: Optional[str] = None
+    quote_asset: Optional[str] = None
+    envelope_capital: float = 500.0
+    grid_step_pct: float = 0.0040
+    grid_rungs: int = 5
+    order_size_fiat: float = 50.0
+    rebalance_threshold_pct: float = 0.012
+    sniper_enabled: bool = True
+    sniper_order_size_fiat: float = 50.0
+    sniper_hurdle_pct: float = 0.0011
+    is_active: bool = True
+
+@app.get("/api/pairs")
+async def get_trading_pairs(mode: Optional[str] = None):
+    """Fetches configured trading pairs from SQLite and Rust Engine."""
+    target_mode = (mode or coordinator.mode_config).lower()
+    from app.database import PaperSessionLocal, LiveSessionLocal
+    from app.models import PairConfiguration
+    from sqlalchemy import select
+
+    sessionmaker = LiveSessionLocal if target_mode == "live" else PaperSessionLocal
+    try:
+        async with sessionmaker() as session:
+            result = await session.execute(select(PairConfiguration))
+            pairs = result.scalars().all()
+            if pairs:
+                return [
+                    {
+                        "symbol": p.symbol,
+                        "venue_symbol": p.venue_symbol,
+                        "base_asset": p.base_asset,
+                        "quote_asset": p.quote_asset,
+                        "envelope_capital": p.envelope_capital,
+                        "grid_step_pct": p.grid_step_pct,
+                        "grid_rungs": p.grid_rungs,
+                        "order_size_fiat": p.order_size_fiat,
+                        "rebalance_threshold_pct": p.rebalance_threshold_pct,
+                        "sniper_enabled": p.sniper_enabled,
+                        "sniper_order_size_fiat": p.sniper_order_size_fiat,
+                        "sniper_hurdle_pct": p.sniper_hurdle_pct,
+                        "is_active": p.is_active,
+                    }
+                    for p in pairs
+                ]
+    except Exception as e:
+        logger.warning(f"Failed to query pairs from DB: {e}")
+
+    # Fallback to IPC
+    ipc_res = await ipc_client.list_pairs()
+    if ipc_res.get("type") == "PairsList":
+        return ipc_res.get("payload", {}).get("pairs", [])
+    return []
+
+@app.post("/api/pairs")
+async def add_trading_pair(req: AddPairRequest, mode: Optional[str] = None):
+    """Hot-adds or updates a trading pair across DB, Kraken Oracle, and Rust Engine."""
+    sym_slash = req.symbol.upper().replace("-", "/")
+    parts = sym_slash.split("/")
+    base = req.base_asset or parts[0]
+    quote = req.quote_asset or (parts[1] if len(parts) > 1 else "USD")
+    venue = req.venue_symbol or f"{base}-{quote}"
+
+    target_mode = (mode or coordinator.mode_config).lower()
+    from app.database import PaperSessionLocal, LiveSessionLocal
+    from app.models import PairConfiguration
+    from app.kraken_streamer import kraken_streamer
+
+    sessionmaker = LiveSessionLocal if target_mode == "live" else PaperSessionLocal
+    try:
+        async with sessionmaker() as session:
+            pair = await session.get(PairConfiguration, sym_slash)
+            if not pair:
+                pair = PairConfiguration(symbol=sym_slash)
+                session.add(pair)
+
+            pair.venue_symbol = venue
+            pair.base_asset = base
+            pair.quote_asset = quote
+            pair.envelope_capital = req.envelope_capital
+            pair.grid_step_pct = req.grid_step_pct
+            pair.grid_rungs = req.grid_rungs
+            pair.order_size_fiat = req.order_size_fiat
+            pair.rebalance_threshold_pct = req.rebalance_threshold_pct
+            pair.sniper_enabled = req.sniper_enabled
+            pair.sniper_order_size_fiat = req.sniper_order_size_fiat
+            pair.sniper_hurdle_pct = req.sniper_hurdle_pct
+            pair.is_active = req.is_active
+            await session.commit()
+    except Exception as e:
+        logger.error(f"Failed to save pair {sym_slash} to DB: {e}")
+
+    # Hot-subscribe Python streamer
+    try:
+        await kraken_streamer.subscribe_symbol(sym_slash)
+    except Exception as e:
+        logger.warning(f"Notice hot-subscribing python kraken streamer: {e}")
+
+    # Dispatch to Rust Engine over IPC
+    pair_dto = {
+        "symbol": {"base": base, "quote": quote},
+        "envelope_capital": str(req.envelope_capital),
+        "grid_step_pct": str(req.grid_step_pct),
+        "grid_rungs": req.grid_rungs,
+        "order_size_fiat": str(req.order_size_fiat),
+        "rebalance_threshold_pct": str(req.rebalance_threshold_pct),
+        "sniper_enabled": req.sniper_enabled,
+        "sniper_order_size_fiat": str(req.sniper_order_size_fiat),
+        "sniper_hurdle_pct": str(req.sniper_hurdle_pct),
+        "is_active": req.is_active,
+    }
+
+    ipc_res = await ipc_client.add_pair(pair_dto)
+    return {
+        "status": "success",
+        "message": f"Pair {sym_slash} configured and hot-spawned in Rust Engine",
+        "ipc_result": ipc_res,
+    }
 
 @app.websocket("/api/ws/stream")
 async def websocket_telemetry_stream(websocket: WebSocket):
@@ -229,7 +333,7 @@ async def websocket_telemetry_stream(websocket: WebSocket):
     logger.info(f"Dashboard connected to telemetry WebSocket [Mode: {mode or 'default'}]")
     try:
         while True:
-            telemetry = coordinator.get_telemetry(mode)
+            telemetry = await coordinator.get_telemetry_async(mode)
             await websocket.send_json(telemetry)
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:

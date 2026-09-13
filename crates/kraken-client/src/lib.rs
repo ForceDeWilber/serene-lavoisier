@@ -20,6 +20,8 @@ struct SubscribeRequest {
 struct SubscribeParams {
     channel: String,
     symbol: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_trigger: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,16 +53,21 @@ pub struct KrakenWsMultiplexer {
     ws_url: String,
     symbols: Vec<Symbol>,
     tick_tx: broadcast::Sender<MarketTick>,
+    sub_tx: tokio::sync::mpsc::UnboundedSender<Vec<Symbol>>,
+    sub_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<Symbol>>,
 }
 
 impl KrakenWsMultiplexer {
     pub fn new(ws_url: impl Into<String>, symbols: Vec<Symbol>) -> (Self, broadcast::Receiver<MarketTick>) {
         let (tick_tx, tick_rx) = broadcast::channel(1024);
+        let (sub_tx, sub_rx) = tokio::sync::mpsc::unbounded_channel();
         (
             Self {
                 ws_url: ws_url.into(),
                 symbols,
                 tick_tx,
+                sub_tx,
+                sub_rx,
             },
             tick_rx,
         )
@@ -70,9 +77,22 @@ impl KrakenWsMultiplexer {
         self.tick_tx.subscribe()
     }
 
-    pub async fn run(self) {
+    pub fn tick_sender(&self) -> broadcast::Sender<MarketTick> {
+        self.tick_tx.clone()
+    }
+
+    pub fn subscribe_sender(&self) -> tokio::sync::mpsc::UnboundedSender<Vec<Symbol>> {
+        self.sub_tx.clone()
+    }
+
+    pub fn subscribe_symbol(&self, symbol: Symbol) {
+        let _ = self.sub_tx.send(vec![symbol]);
+    }
+
+    pub async fn run(mut self) {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(30);
+        let mut active_symbols: std::collections::HashSet<Symbol> = self.symbols.drain(..).collect();
 
         loop {
             info!("Connecting to Kraken WebSocket v2 at {}", self.ws_url);
@@ -83,42 +103,75 @@ impl KrakenWsMultiplexer {
 
                     let (mut write, mut read) = ws_stream.split();
 
-                    // Send subscription request for tickers
-                    let symbol_strs: Vec<String> = self.symbols.iter().map(|s| s.as_slash()).collect();
-                    let sub_msg = SubscribeRequest {
-                        method: "subscribe".into(),
-                        params: SubscribeParams {
-                            channel: "ticker".into(),
-                            symbol: symbol_strs.clone(),
-                        },
-                    };
+                    // Send initial subscription request for all accumulated symbols
+                    let symbol_strs: Vec<String> = active_symbols.iter().map(|s| s.as_slash()).collect();
+                    if !symbol_strs.is_empty() {
+                        let sub_msg = SubscribeRequest {
+                            method: "subscribe".into(),
+                            params: SubscribeParams {
+                                channel: "ticker".into(),
+                                symbol: symbol_strs.clone(),
+                                event_trigger: Some("bbo".into()),
+                            },
+                        };
 
-                    if let Ok(json) = serde_json::to_string(&sub_msg) {
-                        info!("Subscribing to Kraken ticker for symbols: {:?}", symbol_strs);
-                        if let Err(e) = write.send(Message::Text(json.into())).await {
-                            error!("Failed to send subscribe message: {}", e);
-                            continue;
+                        if let Ok(json) = serde_json::to_string(&sub_msg) {
+                            info!("Subscribing to Kraken ticker for symbols: {:?}", symbol_strs);
+                            if let Err(e) = write.send(Message::Text(json.into())).await {
+                                error!("Failed to send subscribe message: {}", e);
+                                continue;
+                            }
                         }
                     }
 
-                    // Message processing loop
-                    while let Some(msg_result) = read.next().await {
-                        match msg_result {
-                            Ok(Message::Text(text)) => {
-                                self.handle_message(&text);
+                    // Message processing & dynamic subscription loop
+                    loop {
+                        tokio::select! {
+                            Some(new_syms) = self.sub_rx.recv() => {
+                                let mut to_sub = Vec::new();
+                                for s in new_syms {
+                                    if active_symbols.insert(s.clone()) {
+                                        to_sub.push(s.as_slash());
+                                    }
+                                }
+                                if !to_sub.is_empty() {
+                                    let sub_msg = SubscribeRequest {
+                                        method: "subscribe".into(),
+                                        params: SubscribeParams {
+                                            channel: "ticker".into(),
+                                            symbol: to_sub.clone(),
+                                            event_trigger: Some("bbo".into()),
+                                        },
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&sub_msg) {
+                                        info!("[KRAKEN-WS] Hot-subscribing to symbols: {:?}", to_sub);
+                                        let _ = write.send(Message::Text(json.into())).await;
+                                    }
+                                }
                             }
-                            Ok(Message::Ping(payload)) => {
-                                let _ = write.send(Message::Pong(payload)).await;
+                            msg_opt = read.next() => {
+                                match msg_opt {
+                                    Some(Ok(Message::Text(text))) => {
+                                        self.handle_message(&text);
+                                    }
+                                    Some(Ok(Message::Ping(payload))) => {
+                                        let _ = write.send(Message::Pong(payload)).await;
+                                    }
+                                    Some(Ok(Message::Close(frame))) => {
+                                        warn!("Kraken WS closed by remote: {:?}", frame);
+                                        break;
+                                    }
+                                    Some(Err(e)) => {
+                                        error!("Kraken WS error: {}", e);
+                                        break;
+                                    }
+                                    None => {
+                                        warn!("Kraken WS stream ended");
+                                        break;
+                                    }
+                                    _ => {}
+                                }
                             }
-                            Ok(Message::Close(frame)) => {
-                                warn!("Kraken WS closed by remote: {:?}", frame);
-                                break;
-                            }
-                            Err(e) => {
-                                error!("Kraken WS error: {}", e);
-                                break;
-                            }
-                            _ => {}
                         }
                     }
                 }

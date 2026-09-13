@@ -30,12 +30,70 @@ impl Symbol {
         Self::new("SOL", "GBP")
     }
 
+    pub fn xrp_gbp() -> Self {
+        Self::new("XRP", "GBP")
+    }
+
+    pub fn btc_usd() -> Self {
+        Self::new("BTC", "USD")
+    }
+
+    pub fn eth_usd() -> Self {
+        Self::new("ETH", "USD")
+    }
+
+    pub fn sol_usd() -> Self {
+        Self::new("SOL", "USD")
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        if let Some((b, q)) = s.split_once('/') {
+            Some(Self::new(b, q))
+        } else if let Some((b, q)) = s.split_once('-') {
+            Some(Self::new(b, q))
+        } else {
+            None
+        }
+    }
+
     pub fn as_slash(&self) -> String {
         format!("{}/{}", self.base, self.quote)
     }
 
     pub fn as_dash(&self) -> String {
         format!("{}-{}", self.base, self.quote)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PairConfig {
+    pub symbol: Symbol,
+    pub envelope_capital: Decimal,
+    pub grid_step_pct: Decimal,
+    pub grid_rungs: usize,
+    pub order_size_fiat: Decimal,
+    pub rebalance_threshold_pct: Decimal,
+    pub sniper_enabled: bool,
+    pub sniper_order_size_fiat: Decimal,
+    pub sniper_hurdle_pct: Decimal,
+    pub is_active: bool,
+}
+
+impl PairConfig {
+    pub fn default_for(symbol: Symbol) -> Self {
+        let is_sol = symbol.base == "SOL";
+        Self {
+            symbol,
+            envelope_capital: Decimal::from(500),
+            grid_step_pct: if is_sol { rust_decimal_macros::dec!(0.0060) } else { rust_decimal_macros::dec!(0.0040) },
+            grid_rungs: 5,
+            order_size_fiat: Decimal::from(50),
+            rebalance_threshold_pct: if is_sol { rust_decimal_macros::dec!(0.015) } else { rust_decimal_macros::dec!(0.012) },
+            sniper_enabled: true,
+            sniper_order_size_fiat: Decimal::from(50),
+            sniper_hurdle_pct: rust_decimal_macros::dec!(0.0011),
+            is_active: true,
+        }
     }
 }
 
@@ -112,7 +170,7 @@ impl Order {
     ) -> Self {
         let now = Utc::now();
         let id = Uuid::new_v4();
-        let client_order_id = format!("ord_{}", id.simple());
+        let client_order_id = id.to_string();
         Self {
             id,
             client_order_id,
@@ -124,6 +182,33 @@ impl Order {
             qty,
             filled_qty: Decimal::ZERO,
             post_only: true,
+            status: OrderStatus::New,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn new_limit_taker(
+        runner_id: impl Into<String>,
+        symbol: Symbol,
+        side: OrderSide,
+        price: Decimal,
+        qty: Decimal,
+    ) -> Self {
+        let now = Utc::now();
+        let id = Uuid::new_v4();
+        let client_order_id = id.to_string();
+        Self {
+            id,
+            client_order_id,
+            runner_id: runner_id.into(),
+            symbol,
+            side,
+            order_type: OrderType::Limit,
+            price,
+            qty,
+            filled_qty: Decimal::ZERO,
+            post_only: false,
             status: OrderStatus::New,
             created_at: now,
             updated_at: now,

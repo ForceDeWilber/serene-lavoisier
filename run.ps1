@@ -133,17 +133,15 @@ function Start-Components {
     # 1. Rust Engine Daemon
     if ($Target -in @("all", "engine")) {
         $engineExe = Join-Path $ProjectRoot "target\debug\engine-daemon.exe"
-        if ($DoBuild -or (-not (Test-Path $engineExe))) {
-            Write-Host "Compiling Rust engine-daemon..." -ForegroundColor Yellow
-            $cargoCmd = (Get-Command cargo -ErrorAction SilentlyContinue).Source
-            if (-not $cargoCmd) {
-                $cargoCmd = Join-Path $HOME ".cargo\bin\cargo.exe"
-            }
-            & $cargoCmd build -p engine-daemon
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "Build failed for engine-daemon!" -ForegroundColor Red
-                return
-            }
+        Write-Host "Compiling Rust engine-daemon..." -ForegroundColor Yellow
+        $cargoCmd = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+        if (-not $cargoCmd) {
+            $cargoCmd = Join-Path $HOME ".cargo\bin\cargo.exe"
+        }
+        & $cargoCmd build -p engine-daemon
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Build failed for engine-daemon!" -ForegroundColor Red
+            return
         }
 
         $engineLog = Join-Path $LogsDir "engine.log"

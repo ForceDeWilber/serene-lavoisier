@@ -24,7 +24,7 @@ rust_decimal = { version = "1.36", features = ["serde", "maths"] }
 rust_decimal_macros = "1.36"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.13", features = ["v4", "serde"] }
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core", "pkcs8", "pem"] }
 base64 = "0.22"
 hex = "0.4"
 tracing = "0.1"
@@ -33,3 +33,4 @@ thiserror = "2.0"
 anyhow = "1.0"
 async-trait = "0.1"
 dotenvy = "0.15"
+rusqlite = { version = "0.33", features = ["bundled"] }

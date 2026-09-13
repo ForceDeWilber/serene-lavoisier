@@ -1,24 +1,53 @@
-# Architectural Decisions & Findings
+# Architectural Decisions & Strategy Specifications
 
-## 1. Engine Division of Responsibilities
-The system currently operates a dual-language architecture:
-- **Rust (`crates/engine-daemon`)**: Acts as the high-throughput "Muscle". It handles the massive data ingest from Kraken WebSockets, maintains the Central Risk Engine envelopes, and runs the high-performance Paper Trading sandbox. 
-- **Python (`backend/app`)**: Acts as the orchestrator and Live API gateway. It holds the Ed25519 private keys, signs HTTP payloads, manages the SQLite database, and handles the Next.js Dashboard telemetry.
+## 1. Single Decision & Execution Engine (Pure Rust Core)
+The system's execution and strategy decision-making are consolidated strictly into **Rust (`crates/engine-daemon`, `crates/trading-core`, `crates/revolut-client`)**:
+- **Sole Authority:** All market data ingestion, lead-lag signal evaluation, risk engine calculations, and order placements/cancellations execute deterministically in Rust.
+- **Microsecond Hot Path:** Utilizes Tokio async tasks, sub-millisecond JSON parsing, pre-warmed HTTP/2 TLS connection pools, and `ed25519-dalek` cryptographic signing (~15 microseconds) to achieve true low-latency execution.
+- **Role of Python (`backend/app`):** Demoted to a lightweight telemetry interlayer between the Rust engine and the Next.js web dashboard. Python makes zero trading decisions, holds no live signing authority on execution hot paths, and merely relays telemetry and UI tuning commands over IPC (Unix Domain Socket / TCP).
 
-## 2. Why Live Trading is in Python (For Now)
-Currently, the Live Engine (`live_trading_runner.py`) exclusively runs a **Maker Grid Strategy** (placing `post_only` limit orders). 
-Because the bot rests on the order book waiting for the market to come to it (capturing 0.40% geometric swings), it does not need to race other bots. The ~20-50ms overhead of Python serializing JSON and calculating Ed25519 signatures doesn't impact profitability for resting maker orders. Python also allows for rapid iteration when dealing with messy exchange JSON and API quirks.
+---
 
-## 3. The Sniper Bot Latency Constraint
-The **Stale Quote Sniper** relies on latency arbitrage—spotting a price spike on Kraken and aggressively crossing the Revolut X spread to grab cash before Revolut X can update its quotes (usually a 50-100ms window).
+## 2. Asymmetric Dual-Venue Model
+The engine operates across two venues with distinct asymmetric roles:
+1. **Kraken Pro WebSocket v2 (Informational Oracle):**
+   - Ingests real-time tick-by-tick market data and top-of-book quotes for BTC/GBP and ETH/GBP.
+   - **Zero trades are placed on Kraken.** Kraken serves purely as a high-speed price discovery oracle.
+2. **Revolut X Spot (Execution Venue):**
+   - All live trades, liquidity provision, and latency snipes execute exclusively on Revolut X.
+   - Leverages Revolut X's fee structure:
+     - **Maker Fee:** `0.00%` (`post_only` limit orders)
+     - **Taker Fee:** `0.09%` (aggressive market / spread-crossing orders)
 
-**Finding:** The Sniper is currently enabled *only* in the Paper Sandbox. It is intentionally disabled in the Python Live Engine. 
-**Reasoning:** If we attempted a latency snipe in Python, the time taken to detect the spike, sign the cryptography, and dispatch the HTTP POST would often exceed the 50-100ms lag window. We would miss the quote or suffer severe slippage.
+---
 
-**Next Architectural Step:** Before the Sniper bot can be unleashed with Live Capital, the execution and cryptographic signing layer *must* be ported to Rust. Rust's sub-millisecond execution speeds are mandatory to successfully beat Revolut X's internal market makers.
+## 3. High-Frequency Strategies in Rust
 
-## 4. Live Grid Tracking & Rehydration (Fixed)
-We identified and patched a "haze" risk where the Python backend could lose track of open orders if it restarted. 
-- **Rehydration:** On boot, the engine now unconditionally queries `GET /api/1.0/orders/active` and safely pulls any active resting orders directly back into memory. 
-- **Decoupled Polling:** The live sync loop now aggressively checks for fills every 2 seconds regardless of free GBP balance (since free GBP drops to ~£0.00 when fully deployed on the order book). 
-- **Persistence:** Every placed order and fill is now immutably logged to `trading_live.db` to guarantee purchase lot prices are never lost.
+### Strategy A: Stale Quote Lead-Lag Momentum Sniper
+- **Concept:** Secondary exchanges (Revolut X) lag primary liquid venues (Kraken) by ~100ms to 1s during sudden price impulses. The Sniper detects a Kraken breakout and captures the stale quote on Revolut X before Revolut X's internal market makers adjust their quotes.
+- **Fee Hurdle & Quantitative Threshold:**
+  - Sniping a stale quote requires an aggressive **Taker order** (crossing the spread to lift the stale ask or hit the stale bid), incurring a **0.09% taker fee**.
+  - **Threshold Rule:** The engine strictly enforces a minimum price dislocation hurdle:
+    $$\Delta P_{\text{dislocation}} \ge P_{\text{entry}} \times (\text{Taker Fee [0.09\%]} + \text{Target Net Edge [}\ge 0.01\%\text{–}0.03\%\text{]})$$
+    The signal requires a minimum **0.10% to 0.12%** price dislocation before triggering (e.g. $\ge £60\text{–}£72$ impulse on BTC at £60,000).
+- **Two-Leg Execution Cycle:**
+  1. **Leg 1 (Snipe Entry):** Instant Taker order lifting the stale Revolut X ask (pays 0.09% fee).
+  2. **Leg 2 (Profit Exit):** Immediate `post_only` Maker limit sell placed at the new equilibrium price predicted by Kraken (pays 0.00% maker fee), capturing $\ge 0.10\% - 0.12\%$ gross swing.
+  3. **Scratch / Timeout Guard:** If Revolut X's quote stalls and the maker exit does not fill within 500–1000ms, the engine scratches the position at market to prevent holding a reverse-moving knife.
+- **Spot Inventory Constraints:**
+  - *Bullish Spike:* Deploy available GBP to buy stale ask $\to$ sell at higher target.
+  - *Bearish Drop:* Requires pre-existing crypto inventory to sell stale bid $\to$ buy back lower (no short-selling on spot).
+
+### Strategy B: Geometric Maker Grid (Passive Liquidity Harvesting)
+- **Concept:** Continuous resting `post_only` buy and sell rungs capturing 0.40% geometric volatility oscillations at **0.00% maker fees**.
+- **Adverse Selection Protection (Lag Filter):**
+  - Because resting bids are exposed to toxic flow during crashes, the Rust engine continuously monitors Kraken WS price velocity.
+  - If Kraken drops $\ge 0.60\%$ within 1 second, the Rust engine issues sub-millisecond cancellations of all resting Revolut X buy orders before toxic flow sweeps the book.
+
+---
+
+## 4. Live Order Tracking, Rehydration & State Persistence
+- **Rehydration:** On boot, the Rust engine unconditionally queries `GET /api/1.0/orders/active` to pull resting orders directly into the in-memory strategy state.
+- **Fill Verification:** Orders missing from the active set are verified against execution fill history before assuming 100% fill, preventing phantom fills from external cancellations.
+- **Persistence:** Every order lifecycle transition (OPEN, FILLED, CANCELED) is written to SQLite (`trading_live.db`) to ensure auditability and prevent lot price loss across process restarts.
+- **Risk Envelopes:** The Rust `CentralRiskEngine` enforces capital limits (£500 default envelopes) and a rolling 5% portfolio drawdown circuit breaker.

@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Lock, ArrowRight } from "lucide-react";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const returnUrl = searchParams.get("returnUrl") || "/dashboard";
@@ -43,6 +43,42 @@ export default function LoginPage() {
   };
 
   return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div>
+        <input
+          type="password"
+          inputMode="numeric"
+          autoFocus
+          value={pin}
+          onChange={(e) => {
+            setPin(e.target.value);
+            if (error) setError("");
+          }}
+          placeholder="Enter PIN"
+          className="w-full text-center bg-[#0d1117] border border-[#30363d] focus:border-[#58a6ff] focus:ring-1 focus:ring-[#58a6ff] rounded-lg py-2.5 px-3 text-sm font-mono tracking-widest text-[#f0f6fc] placeholder:text-[#484f58] outline-none transition"
+        />
+      </div>
+
+      {error && (
+        <p className="text-xs text-[#f85149] text-center font-mono">
+          {error}
+        </p>
+      )}
+
+      <button
+        type="submit"
+        disabled={submitting || pin.length === 0}
+        className="w-full bg-[#238636] hover:bg-[#2ea043] disabled:bg-[#21262d] text-white disabled:text-[#484f58] font-medium py-2 rounded-lg text-xs flex items-center justify-center gap-1.5 transition disabled:cursor-not-allowed"
+      >
+        <span>{submitting ? "Verifying..." : "Authenticate"}</span>
+        <ArrowRight className="w-3.5 h-3.5" />
+      </button>
+    </form>
+  );
+}
+
+export default function LoginPage() {
+  return (
     <main className="min-h-screen bg-[#0d1117] flex items-center justify-center p-4 text-[#e6edf3]">
       <div className="w-full max-w-xs bg-[#161b22] border border-[#30363d] rounded-xl p-6 space-y-5 shadow-lg">
         {/* Header */}
@@ -58,38 +94,10 @@ export default function LoginPage() {
           </p>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <input
-              type="password"
-              inputMode="numeric"
-              autoFocus
-              value={pin}
-              onChange={(e) => {
-                setPin(e.target.value);
-                if (error) setError("");
-              }}
-              placeholder="Enter PIN"
-              className="w-full text-center bg-[#0d1117] border border-[#30363d] focus:border-[#58a6ff] focus:ring-1 focus:ring-[#58a6ff] rounded-lg py-2.5 px-3 text-sm font-mono tracking-widest text-[#f0f6fc] placeholder:text-[#484f58] outline-none transition"
-            />
-          </div>
-
-          {error && (
-            <p className="text-xs text-[#f85149] text-center font-mono">
-              {error}
-            </p>
-          )}
-
-          <button
-            type="submit"
-            disabled={submitting || pin.length === 0}
-            className="w-full bg-[#238636] hover:bg-[#2ea043] disabled:bg-[#21262d] text-white disabled:text-[#484f58] font-medium py-2 rounded-lg text-xs flex items-center justify-center gap-1.5 transition disabled:cursor-not-allowed"
-          >
-            <span>{submitting ? "Verifying..." : "Authenticate"}</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
-        </form>
+        {/* Form wrapped in Suspense */}
+        <Suspense fallback={<div className="text-center text-xs text-[#8b949e]">Loading...</div>}>
+          <LoginForm />
+        </Suspense>
       </div>
     </main>
   );

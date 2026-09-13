@@ -1,3 +1,6 @@
+pub mod sniper;
+pub use sniper::*;
+
 use crate::model::{Fill, Order, OrderSide, Symbol};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;

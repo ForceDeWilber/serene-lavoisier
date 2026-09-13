@@ -1,26 +1,26 @@
 mod ipc;
+mod manager;
 
 use dotenvy::dotenv;
 use ipc::IpcServer;
+use manager::RunnerManager;
+use kraken_client::KrakenWsMultiplexer;
+use revolut_client::{LiveRevolutClient, PaperRevolutClient};
 use rust_decimal_macros::dec;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use kraken_client::KrakenWsMultiplexer;
-use trading_core::model::Symbol;
+use trading_core::execution::ExecutionClient;
 use trading_core::risk::CentralRiskEngine;
-use trading_core::runner::{GridRunner, RunnerTuningUpdate};
 use trading_core::simulator::PaperExecutionSimulator;
-use trading_core::strategy::GridConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 1. Initialize logging
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,kraken_client=info,trading_core=info".into()))
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,kraken_client=info,trading_core=info,revolut_client=info".into()))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -30,99 +30,117 @@ async fn main() -> anyhow::Result<()> {
 
     info!("============================================================");
     info!("Starting Multi-Venue Algorithmic Crypto Trading System (UK)");
-    info!("Asymmetric Venue Model: Revolut X (0% Maker) + Kraken Pro WS");
-    if trading_mode == "LIVE" {
-        info!("Execution Mode: 🔴 LIVE REAL CAPITAL (Revolut X HTTP/2)");
-        let api_key = std::env::var("REVOLUT_API_KEY").unwrap_or_default();
-        let priv_path = std::env::var("REVOLUT_PRIVATE_KEY_PATH").unwrap_or_else(|_| "backend/credentials/revolut_private.pem".into());
-        if api_key.is_empty() || !std::path::Path::new(&priv_path).exists() {
-            tracing::error!("FATAL: TRADING_MODE=LIVE requested, but REVOLUT_API_KEY or revolut_private.pem is missing!");
-            tracing::error!("Refusing to run live execution without valid credentials.");
-            std::process::exit(1);
-        }
-    } else {
-        info!("Execution Mode: 🧪 PAPER TRADING (Virtual Simulator)");
-    }
+    info!("Asymmetric Venue Model: Revolut X (Execution) + Kraken Pro WS (Oracle)");
+    info!("System Architecture: Pure Rust Decision & Execution Engine");
+    info!("Execution Mode: {}", if trading_mode == "LIVE" { "🔴 LIVE REAL CAPITAL (Revolut X HTTP/2)" } else { "🧪 PAPER TRADING (Virtual Simulator)" });
+    info!("Dynamic Pair Architecture: Enabled (Database-Driven)");
     info!("============================================================");
 
-    // 2. Risk Engine & Capital Envelopes
+    // 2. Risk Engine
     let max_drawdown_pct = dec!(0.05); // 5.0% rolling circuit breaker
     let lag_drop_threshold_pct = dec!(0.006); // 0.6% adverse selection drop threshold
     let risk_engine = Arc::new(CentralRiskEngine::new(max_drawdown_pct, lag_drop_threshold_pct));
 
-    let btc_envelope_gbp = dec!(500.00);
-    let eth_envelope_gbp = dec!(500.00);
+    let db_path = if trading_mode == "LIVE" { "trading_live.db" } else { "trading_paper.db" };
+    let db_store = match trading_core::db::DbStore::new(db_path).await {
+        Ok(db) => Some(Arc::new(db)),
+        Err(e) => {
+            error!("Failed to initialize database: {}", e);
+            None
+        }
+    };
 
-    risk_engine.register_envelope("runner_btc", "GBP", btc_envelope_gbp).await;
-    risk_engine.register_envelope("runner_eth", "GBP", eth_envelope_gbp).await;
+    // 3. Execution Client Selection (Polymorphic: Live vs Paper)
+    let (execution_client, paper_sim): (Arc<dyn ExecutionClient>, Option<Arc<PaperExecutionSimulator>>) = if trading_mode == "LIVE" {
+        let api_key = std::env::var("REVOLUT_API_KEY").unwrap_or_default();
+        let priv_path = std::env::var("REVOLUT_PRIVATE_KEY_PATH").unwrap_or_else(|_| "backend/credentials/revolut_private.pem".into());
+        let base_url = std::env::var("REVOLUT_BASE_URL").unwrap_or_else(|_| "https://revx.revolut.com".into());
 
-    info!(
-        "Capital Envelopes initialized: runner_btc = £{}, runner_eth = £{}",
-        btc_envelope_gbp, eth_envelope_gbp
-    );
+        if api_key.is_empty() || (!std::path::Path::new(&priv_path).exists() && !priv_path.contains("-----BEGIN")) {
+            error!("FATAL: TRADING_MODE=LIVE requested, but REVOLUT_API_KEY or revolut_private.pem is missing!");
+            error!("Refusing to run live execution without valid credentials.");
+            std::process::exit(1);
+        }
 
-    // 3. In-memory Paper Execution Simulator
-    let total_paper_capital = btc_envelope_gbp + eth_envelope_gbp;
-    let simulator = Arc::new(PaperExecutionSimulator::new(total_paper_capital));
+        let live_client = LiveRevolutClient::new(base_url, api_key, &priv_path)
+            .map_err(|e| anyhow::anyhow!("Failed to initialize LiveRevolutClient: {}", e))?;
 
-    // 4. Kraken WebSocket v2 Multiplexer
+        let client_arc: Arc<dyn ExecutionClient> = Arc::new(live_client);
+
+        // Verify live credentials and balances
+        match client_arc.get_balances().await {
+            Ok(bals) => {
+                info!("✅ [LIVE AUTH SUCCESS] Revolut X Balances: GBP: £{:.2}, USD: ${:.2}, BTC: {:.6}, ETH: {:.6}, SOL: {:.4}",
+                    bals.get("GBP").unwrap_or(&rust_decimal::Decimal::ZERO),
+                    bals.get("USD").unwrap_or(&rust_decimal::Decimal::ZERO),
+                    bals.get("BTC").unwrap_or(&rust_decimal::Decimal::ZERO),
+                    bals.get("ETH").unwrap_or(&rust_decimal::Decimal::ZERO),
+                    bals.get("SOL").unwrap_or(&rust_decimal::Decimal::ZERO)
+                );
+            }
+            Err(e) => {
+                error!("❌ [LIVE AUTH FAILED] Could not fetch balances from Revolut X: {}", e);
+            }
+        }
+
+        // Rehydrate active resting orders on boot
+        match client_arc.get_active_orders().await {
+            Ok(orders) => {
+                info!("🔄 [REHYDRATION] Successfully rehydrated {} resting orders directly from Revolut X book", orders.len());
+            }
+            Err(e) => {
+                warn!("⚠️ [REHYDRATION] Notice fetching active orders: {}", e);
+            }
+        }
+
+        (client_arc, None)
+    } else {
+        let total_paper_capital = dec!(3000.00);
+        let simulator = Arc::new(PaperExecutionSimulator::new(total_paper_capital));
+        let paper_client = Arc::new(PaperRevolutClient::new(simulator.clone()));
+        (paper_client, Some(simulator))
+    };
+
+    // 4. Load Active Pairs from Database
+    let active_pair_configs = if let Some(ref db) = db_store {
+        db.get_active_pair_configs().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    info!("Loaded {} active pair configuration(s) from SQLite", active_pair_configs.len());
+
+    let initial_symbols: Vec<trading_core::model::Symbol> = active_pair_configs.iter().map(|p| p.symbol.clone()).collect();
+
+    // 5. Kraken WebSocket v2 Multiplexer (Informational Oracle)
     let kraken_ws_url = std::env::var("KRAKEN_WS_URL").unwrap_or_else(|_| "wss://ws.kraken.com/v2".into());
-    let symbols = vec![Symbol::btc_gbp(), Symbol::eth_gbp()];
-
-    let (kraken_multiplexer, _primary_rx) = KrakenWsMultiplexer::new(&kraken_ws_url, symbols.clone());
-    let btc_tick_rx = kraken_multiplexer.subscribe_receiver();
-    let eth_tick_rx = kraken_multiplexer.subscribe_receiver();
+    let (kraken_multiplexer, _primary_rx) = KrakenWsMultiplexer::new(&kraken_ws_url, initial_symbols);
+    let kraken_sub_tx = kraken_multiplexer.subscribe_sender();
+    let tick_broadcast = kraken_multiplexer.tick_sender();
 
     // Spawn Kraken WS ingest task
     tokio::spawn(async move {
         kraken_multiplexer.run().await;
     });
 
-    // 5. Runner 1: BTC/GBP Geometric Grid
-    let btc_config = GridConfig {
-        runner_id: "runner_btc".into(),
-        symbol: Symbol::btc_gbp(),
-        step_pct: dec!(0.0040), // 0.40% geometric step
-        rungs_per_side: 5,
-        order_size_gbp: dec!(50.0),
-        rebalance_threshold_pct: dec!(0.012),
-    };
-    let (btc_tune_tx, btc_tune_rx) = watch::channel(RunnerTuningUpdate {
-        paused: false,
-        step_pct: None,
-        rebalance_threshold_pct: None,
-    });
-    let btc_runner = GridRunner::new(
-        btc_config,
+    // 6. Dynamic Runner Manager
+    let runner_manager = Arc::new(RunnerManager::new(
+        execution_client.clone(),
         risk_engine.clone(),
-        simulator.clone(),
-        btc_tick_rx,
-        btc_tune_rx,
-    );
+        paper_sim.clone(),
+        db_store.clone(),
+        kraken_sub_tx,
+        tick_broadcast,
+    ));
 
-    // 6. Runner 2: ETH/GBP Geometric Grid
-    let eth_config = GridConfig {
-        runner_id: "runner_eth".into(),
-        symbol: Symbol::eth_gbp(),
-        step_pct: dec!(0.0040), // 0.40% geometric step
-        rungs_per_side: 5,
-        order_size_gbp: dec!(50.0),
-        rebalance_threshold_pct: dec!(0.012),
-    };
-    let (eth_tune_tx, eth_tune_rx) = watch::channel(RunnerTuningUpdate {
-        paused: false,
-        step_pct: None,
-        rebalance_threshold_pct: None,
-    });
-    let eth_runner = GridRunner::new(
-        eth_config,
-        risk_engine.clone(),
-        simulator.clone(),
-        eth_tick_rx,
-        eth_tune_rx,
-    );
+    // 7. Spawn runners for all loaded active pairs
+    for config in active_pair_configs {
+        let sym_slash = config.symbol.as_slash();
+        if let Err(e) = runner_manager.spawn_pair(config).await {
+            error!("Failed to spawn runners for pair {}: {}", sym_slash, e);
+        }
+    }
 
-    // 7. IPC Server (Unix Domain Socket on Unix, TCP on Windows)
+    // 8. IPC Telemetry Server (Unix Domain Socket on Unix, TCP on Windows)
     let default_sock = if cfg!(windows) {
         "127.0.0.1:9099".to_string()
     } else {
@@ -131,55 +149,43 @@ async fn main() -> anyhow::Result<()> {
     let socket_path = std::env::var("ENGINE_UDS_PATH").unwrap_or(default_sock);
     let ipc_server = IpcServer::new(
         socket_path,
+        trading_mode.clone(),
+        execution_client.clone(),
         risk_engine.clone(),
-        simulator.clone(),
-        btc_tune_tx,
-        eth_tune_tx,
+        runner_manager.clone(),
     );
     ipc_server.run().await?;
 
-    let is_live = trading_mode == "LIVE";
-    if !is_live {
-        // Spawn paper sandbox runners
-        tokio::spawn(async move {
-            btc_runner.run().await;
-        });
+    // 9. Background Heartbeat Logger
+    let client_heartbeat = execution_client.clone();
+    let risk_heartbeat = risk_engine.clone();
+    let mode_str = trading_mode.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            let bals = client_heartbeat.get_balances().await.unwrap_or_default();
+            let resting = client_heartbeat.get_active_orders().await.unwrap_or_default();
+            let cb_tripped = risk_heartbeat.is_circuit_breaker_tripped().await;
 
-        tokio::spawn(async move {
-            eth_runner.run().await;
-        });
+            info!(
+                "[{}-HEARTBEAT] Balances: [GBP: £{:.2}, USD: ${:.2}, BTC: {:.6}, ETH: {:.6}] | Active Orders: {} | Circuit Breaker: {}",
+                mode_str,
+                bals.get("GBP").unwrap_or(&dec!(0.0)),
+                bals.get("USD").unwrap_or(&dec!(0.0)),
+                bals.get("BTC").unwrap_or(&dec!(0.0)),
+                bals.get("ETH").unwrap_or(&dec!(0.0)),
+                resting.len(),
+                if cb_tripped { "TRIPPED" } else { "NORMAL" }
+            );
+        }
+    });
 
-        // 8. Telemetry Heartbeat Logger for Paper Simulator
-        let sim_telemetry = simulator.clone();
-        let risk_telemetry = risk_engine.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            loop {
-                interval.tick().await;
-                let wallet = sim_telemetry.get_wallet().await;
-                let resting = sim_telemetry.get_resting_orders().await;
-                let cb_tripped = risk_telemetry.is_circuit_breaker_tripped().await;
-
-                info!(
-                    "[PAPER-TELEMETRY] Balances: [GBP: £{:.2}, BTC: {:.6}, ETH: {:.6}] | Active Resting Orders: {} | Circuit Breaker: {}",
-                    wallet.gbp,
-                    wallet.btc,
-                    wallet.eth,
-                    resting.len(),
-                    if cb_tripped { "TRIPPED" } else { "NORMAL" }
-                );
-            }
-        });
-    } else {
-        info!("🔴 [LIVE PRODUCTION] In-memory Paper Simulator disabled. Live order execution is managed directly via Revolut X HTTP/2 Live Trading Runner.");
-        info!("📡 [MARKET DATA] Kraken WS v2 Oracle stream active for real-time BTC/GBP & ETH/GBP feeds.");
-    }
-
-    // 8. Wait for termination signal
+    // 10. Wait for termination signal
     tokio::signal::ctrl_c().await?;
-    warn!("Shutdown signal received. Canceling all active resting orders...");
-    let canceled = simulator.cancel_all_orders().await;
-    info!("Successfully canceled {} orders across all venues. System shut down cleanly.", canceled.len());
+    warn!("Shutdown signal received. Canceling all active resting orders across venues...");
+    let _ = execution_client.cancel_all_orders().await;
+    info!("Successfully canceled active orders. System shut down cleanly.");
 
     Ok(())
 }

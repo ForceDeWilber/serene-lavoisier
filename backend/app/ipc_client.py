@@ -73,4 +73,56 @@ class EngineIpcClient:
         }
         return await self._send_request(request)
 
+    async def tune_sniper(
+        self,
+        runner_id: str = "sniper_btc",
+        enabled: Optional[bool] = None,
+        impulse_threshold_pct: Optional[float] = None,
+        order_size_gbp: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        request = {
+            "type": "TuneSniper",
+            "payload": {
+                "runner_id": runner_id,
+                "enabled": enabled,
+                "impulse_threshold_pct": str(impulse_threshold_pct) if impulse_threshold_pct is not None else None,
+                "order_size_gbp": str(order_size_gbp) if order_size_gbp is not None else None,
+            },
+        }
+        return await self._send_request(request)
+
+    async def toggle_sniper(self, runner_id: str = "sniper_btc", enabled: Optional[bool] = None) -> Dict[str, Any]:
+        request = {
+            "type": "ToggleSniper",
+            "payload": {
+                "runner_id": runner_id,
+                "enabled": enabled,
+            },
+        }
+        return await self._send_request(request)
+
+    async def reset_circuit_breaker(self) -> Dict[str, Any]:
+        request = {
+            "type": "ResetCircuitBreaker",
+            "payload": None,
+        }
+        return await self._send_request(request)
+
+    async def add_pair(self, pair_config: Dict[str, Any]) -> Dict[str, Any]:
+        request = {
+            "type": "AddPair",
+            "payload": {
+                "config": pair_config,
+            },
+        }
+        return await self._send_request(request)
+
+    async def list_pairs(self) -> Dict[str, Any]:
+        request = {
+            "type": "ListPairs",
+            "payload": None,
+        }
+        return await self._send_request(request)
+
 ipc_client = EngineIpcClient()
+
