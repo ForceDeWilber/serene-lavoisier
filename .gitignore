@@ -4,6 +4,8 @@
 .env
 trading*.db
 trading*.db-journal
+trading*.db-wal
+trading*.db-shm
 *.log
 /tmp/trading_engine.sock
 .DS_Store

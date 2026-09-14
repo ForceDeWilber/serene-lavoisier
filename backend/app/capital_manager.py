@@ -19,6 +19,7 @@ class CapitalManager:
         self.crypto_balances: Dict[str, float] = {
             "BTC": 0.0,
             "ETH": 0.0,
+            "SOL": 0.0,
         }
 
         # Dynamic Profit Lock Configuration
@@ -51,6 +52,7 @@ class CapitalManager:
             self.settled_cash_gbp = live_res.get("GBP", self.settled_cash_gbp)
             self.crypto_balances["BTC"] = live_res.get("BTC", self.crypto_balances["BTC"])
             self.crypto_balances["ETH"] = live_res.get("ETH", self.crypto_balances["ETH"])
+            self.crypto_balances["SOL"] = live_res.get("SOL", self.crypto_balances.get("SOL", 0.0))
             logger.info(f"Auto-detected Revolut X live balances: GBP £{self.settled_cash_gbp:,.2f}")
             return {
                 "status": "success",
@@ -59,6 +61,7 @@ class CapitalManager:
                     "GBP": self.settled_cash_gbp,
                     "BTC": self.crypto_balances["BTC"],
                     "ETH": self.crypto_balances["ETH"],
+                    "SOL": self.crypto_balances["SOL"],
                 },
             }
 
@@ -70,6 +73,7 @@ class CapitalManager:
                 "GBP": self.settled_cash_gbp,
                 "BTC": self.crypto_balances["BTC"],
                 "ETH": self.crypto_balances["ETH"],
+                "SOL": self.crypto_balances["SOL"],
             },
         }
 

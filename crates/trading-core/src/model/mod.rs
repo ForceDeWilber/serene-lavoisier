@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Symbol {
     pub base: String,
     pub quote: String,
@@ -248,7 +248,15 @@ pub struct MarketTick {
 
 impl MarketTick {
     pub fn mid_price(&self) -> Decimal {
-        (self.bid + self.ask) / Decimal::from(2)
+        if self.bid > Decimal::ZERO && self.ask > Decimal::ZERO {
+            (self.bid + self.ask) / Decimal::from(2)
+        } else if self.last > Decimal::ZERO {
+            self.last
+        } else if self.bid > Decimal::ZERO {
+            self.bid
+        } else {
+            self.ask
+        }
     }
 
     pub fn spread(&self) -> Decimal {

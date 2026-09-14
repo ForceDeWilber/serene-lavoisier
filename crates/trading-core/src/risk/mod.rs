@@ -210,37 +210,57 @@ impl CentralRiskEngine {
         drop(cb);
 
         // 2. Check Capital Envelope
-        let required_currency = match order.side {
-            OrderSide::Buy => &order.symbol.quote,
-            OrderSide::Sell => &order.symbol.base,
-        };
-        let required_amount = match order.side {
-            OrderSide::Buy => order.price * order.qty,
-            OrderSide::Sell => order.qty,
-        };
+        match order.side {
+            OrderSide::Buy => {
+                let required_currency = &order.symbol.quote;
+                let required_amount = order.price * order.qty;
 
-        let mut envelopes = self.envelopes.lock().await;
-        let key = format!("{}:{}", order.runner_id, required_currency);
-        let envelope = envelopes.get_mut(&key).ok_or_else(|| RiskError::EnvelopeExhausted {
-            currency: required_currency.clone(),
-            required: required_amount,
-            available: Decimal::ZERO,
-        })?;
+                let mut envelopes = self.envelopes.lock().await;
+                let key = format!("{}:{}", order.runner_id, required_currency);
+                let envelope = envelopes.get_mut(&key).ok_or_else(|| RiskError::EnvelopeExhausted {
+                    currency: required_currency.clone(),
+                    required: required_amount,
+                    available: Decimal::ZERO,
+                })?;
 
-        if envelope.available < required_amount {
-            return Err(RiskError::EnvelopeExhausted {
-                currency: required_currency.clone(),
-                required: required_amount,
-                available: envelope.available,
-            });
+                if envelope.available < required_amount {
+                    return Err(RiskError::EnvelopeExhausted {
+                        currency: required_currency.clone(),
+                        required: required_amount,
+                        available: envelope.available,
+                    });
+                }
+
+                // Reserve the quote capital
+                envelope.lock(required_amount).map_err(|_| RiskError::EnvelopeExhausted {
+                    currency: required_currency.clone(),
+                    required: required_amount,
+                    available: envelope.available,
+                })?;
+            }
+            OrderSide::Sell => {
+                // Spot Sell Orders: Liquidates base crypto inventory back into quote fiat.
+                // If an explicit base envelope is configured, enforce and lock it;
+                // Otherwise, permit the spot sell since it returns fiat rather than consuming it.
+                let required_currency = &order.symbol.base;
+                let mut envelopes = self.envelopes.lock().await;
+                let key = format!("{}:{}", order.runner_id, required_currency);
+                if let Some(envelope) = envelopes.get_mut(&key) {
+                    if envelope.available < order.qty {
+                        return Err(RiskError::EnvelopeExhausted {
+                            currency: required_currency.clone(),
+                            required: order.qty,
+                            available: envelope.available,
+                        });
+                    }
+                    envelope.lock(order.qty).map_err(|_| RiskError::EnvelopeExhausted {
+                        currency: required_currency.clone(),
+                        required: order.qty,
+                        available: envelope.available,
+                    })?;
+                }
+            }
         }
-
-        // Reserve the capital
-        envelope.lock(required_amount).map_err(|_| RiskError::EnvelopeExhausted {
-            currency: required_currency.clone(),
-            required: required_amount,
-            available: envelope.available,
-        })?;
 
         Ok(())
     }
@@ -262,6 +282,20 @@ impl CentralRiskEngine {
         }
     }
 
+    /// Releases locked order capital upon fill completion so envelopes rotate properly
+    pub async fn settle_fill(&self, fill: &crate::model::Fill) {
+        let (currency, amount) = match fill.side {
+            OrderSide::Buy => (&fill.symbol.quote, fill.price * fill.qty),
+            OrderSide::Sell => (&fill.symbol.base, fill.qty),
+        };
+
+        let mut envelopes = self.envelopes.lock().await;
+        let key = format!("{}:{}", fill.runner_id, currency);
+        if let Some(env) = envelopes.get_mut(&key) {
+            env.unlock(amount);
+        }
+    }
+
     pub async fn is_circuit_breaker_tripped(&self) -> bool {
         self.circuit_breaker.lock().await.is_tripped()
     }
@@ -274,3 +308,61 @@ impl CentralRiskEngine {
         self.circuit_breaker.lock().await.reset(current_equity);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[tokio::test]
+    async fn test_risk_engine_validates_spot_sell_order() {
+        let risk = CentralRiskEngine::new(dec!(0.05), dec!(0.006));
+        let runner_id = "runner_btc_gbp";
+
+        // Register only GBP quote envelope
+        risk.register_envelope(runner_id, "GBP", dec!(500.0)).await;
+
+        // Buy order for 0.001 BTC @ £50,000 (£50) succeeds
+        let buy_order = Order::new_limit_post_only(runner_id, Symbol::btc_gbp(), OrderSide::Buy, dec!(50000.0), dec!(0.001));
+        assert!(risk.validate_order(&buy_order).await.is_ok());
+
+        // Sell order for 0.001 BTC @ £51,000 succeeds even with no BTC base envelope
+        let sell_order = Order::new_limit_post_only(runner_id, Symbol::btc_gbp(), OrderSide::Sell, dec!(51000.0), dec!(0.001));
+        assert!(risk.validate_order(&sell_order).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_risk_engine_settle_fill_releases_locked_capital() {
+        let risk = CentralRiskEngine::new(dec!(0.05), dec!(0.006));
+        let runner_id = "runner_btc_gbp";
+
+        // Register £100 envelope
+        risk.register_envelope(runner_id, "GBP", dec!(100.0)).await;
+
+        let buy_order = Order::new_limit_post_only(runner_id, Symbol::btc_gbp(), OrderSide::Buy, dec!(50000.0), dec!(0.001));
+        assert!(risk.validate_order(&buy_order).await.is_ok());
+
+        let env_before = risk.get_envelope(runner_id, "GBP").await.unwrap();
+        assert_eq!(env_before.available, dec!(50.0));
+        assert_eq!(env_before.locked, dec!(50.0));
+
+        let fill = crate::model::Fill {
+            order_id: buy_order.id,
+            client_order_id: buy_order.client_order_id.clone(),
+            runner_id: runner_id.to_string(),
+            symbol: Symbol::btc_gbp(),
+            side: OrderSide::Buy,
+            price: dec!(50000.0),
+            qty: dec!(0.001),
+            fee: dec!(0.0),
+            timestamp: chrono::Utc::now(),
+        };
+
+        risk.settle_fill(&fill).await;
+
+        let env_after = risk.get_envelope(runner_id, "GBP").await.unwrap();
+        assert_eq!(env_after.locked, dec!(0.0));
+        assert_eq!(env_after.available, dec!(100.0));
+    }
+}
+

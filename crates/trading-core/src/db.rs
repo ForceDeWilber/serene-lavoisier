@@ -16,6 +16,11 @@ impl DbStore {
         let path = db_path.to_string();
         let conn = tokio::task::spawn_blocking(move || -> anyhow::Result<Connection> {
             let conn = Connection::open(&path)?;
+            conn.execute_batch("
+                PRAGMA journal_mode = WAL;
+                PRAGMA busy_timeout = 5000;
+                PRAGMA synchronous = NORMAL;
+            ")?;
             // Initialize tables matching Python's SQLAlchemy schema
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS order_records (

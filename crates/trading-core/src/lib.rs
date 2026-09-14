@@ -86,10 +86,14 @@ mod tests {
             rungs_per_side: 2,
             order_size_gbp: dec!(50.0),
             rebalance_threshold_pct: dec!(0.015),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: false, // test static baseline spacing
+                ..Default::default()
+            },
         };
         let mut strategy = GeometricGridStrategy::new(config);
         let center = dec!(50000.0);
-        let orders = strategy.initialize_grid(center);
+        let orders = strategy.initialize_grid(center, Some(dec!(100.0)), Some(dec!(1.0)));
 
         // Expect 2 buys and 2 sells
         assert_eq!(orders.len(), 4);
@@ -103,6 +107,31 @@ mod tests {
         assert_eq!(buys[0].price, dec!(49750.00));
         // Sell 1: 50,000 * (1 + 0.005) = 50,250
         assert_eq!(sells[0].price, dec!(50250.00));
+    }
+
+    #[test]
+    fn test_dynamic_grid_inventory_skew() {
+        let config = GridConfig {
+            runner_id: "test_skew_runner".into(),
+            symbol: Symbol::btc_gbp(),
+            step_pct: dec!(0.005),
+            rungs_per_side: 2,
+            order_size_gbp: dec!(50.0),
+            rebalance_threshold_pct: dec!(0.015),
+            dynamic_pricing: DynamicPricingConfig::default(),
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+        strategy.inventory_base = dec!(3.0); // positive inventory (long 3 BTC)
+        let center = dec!(50000.0);
+
+        let orders = strategy.initialize_grid(center, Some(dec!(100.0)), Some(dec!(3.0)));
+        assert_eq!(orders.len(), 4);
+        let buys: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Buy).collect();
+
+        // Effective center should be skewed downward from 50,000 to stimulate sells
+        assert!(strategy.effective_center.unwrap() < center);
+        // Buy prices should be lower than symmetric 49,750
+        assert!(buys[0].price < dec!(49750.00));
     }
 
     #[tokio::test]

@@ -23,6 +23,12 @@ pub struct RunnerTelemetryDto {
     pub total_trades: usize,
     pub active_orders_count: usize,
     pub is_paused: bool,
+    #[serde(default)]
+    pub effective_center: Option<Decimal>,
+    #[serde(default)]
+    pub dynamic_step_pct: Option<Decimal>,
+    #[serde(default)]
+    pub rolling_volatility_pct: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +74,12 @@ pub enum IpcRequest {
         paused: Option<bool>,
         step_pct: Option<Decimal>,
         rebalance_threshold_pct: Option<Decimal>,
+        #[serde(default)]
+        order_size_fiat: Option<Decimal>,
+        #[serde(default)]
+        dynamic_pricing_enabled: Option<bool>,
+        #[serde(default)]
+        inventory_gamma: Option<Decimal>,
     },
     TuneSniper {
         runner_id: String,
@@ -302,8 +314,22 @@ impl IpcServer {
                         paused,
                         step_pct,
                         rebalance_threshold_pct,
+                        order_size_fiat,
+                        dynamic_pricing_enabled,
+                        inventory_gamma,
                     } => {
-                        if manager.tune_runner(&runner_id, paused, step_pct, rebalance_threshold_pct).await {
+                        if manager
+                            .tune_runner(
+                                &runner_id,
+                                paused,
+                                step_pct,
+                                rebalance_threshold_pct,
+                                order_size_fiat,
+                                dynamic_pricing_enabled,
+                                inventory_gamma,
+                            )
+                            .await
+                        {
                             IpcResponse::Ack {
                                 message: format!("Tuned runner {}", runner_id),
                             }

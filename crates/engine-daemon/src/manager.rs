@@ -10,7 +10,9 @@ use trading_core::db::DbStore;
 use trading_core::execution::ExecutionClient;
 use trading_core::model::{MarketTick, PairConfig, Symbol};
 use trading_core::risk::CentralRiskEngine;
-use trading_core::runner::{GridRunner, RunnerTuningUpdate, SniperRunner, SniperTuningUpdate};
+use trading_core::runner::{
+    GridRunner, RunnerTelemetry, RunnerTuningUpdate, SniperRunner, SniperTelemetry, SniperTuningUpdate,
+};
 use trading_core::simulator::PaperExecutionSimulator;
 use trading_core::strategy::{GridConfig, SniperConfig};
 
@@ -20,6 +22,8 @@ pub struct PairHandle {
     pub sniper_runner_id: String,
     pub grid_tune_tx: watch::Sender<RunnerTuningUpdate>,
     pub sniper_tune_tx: watch::Sender<SniperTuningUpdate>,
+    pub grid_telemetry_rx: watch::Receiver<RunnerTelemetry>,
+    pub sniper_telemetry_rx: watch::Receiver<SniperTelemetry>,
 }
 
 pub struct RunnerManager {
@@ -84,6 +88,9 @@ impl RunnerManager {
             paused: !config.is_active,
             step_pct: Some(config.grid_step_pct),
             rebalance_threshold_pct: Some(config.rebalance_threshold_pct),
+            order_size_fiat: Some(config.order_size_fiat),
+            dynamic_pricing_enabled: Some(true),
+            inventory_gamma: Some(dec!(0.08)),
         });
 
         let (sniper_tune_tx, sniper_tune_rx) = watch::channel(SniperTuningUpdate {
@@ -100,6 +107,7 @@ impl RunnerManager {
             rungs_per_side: config.grid_rungs,
             order_size_gbp: config.order_size_fiat,
             rebalance_threshold_pct: config.rebalance_threshold_pct,
+            dynamic_pricing: trading_core::strategy::DynamicPricingConfig::default(),
         };
 
         let grid_runner = GridRunner::new(
@@ -111,6 +119,25 @@ impl RunnerManager {
             grid_tune_rx,
             self.db_store.clone(),
         );
+
+        let (grid_telem_tx, grid_telem_rx) = watch::channel(RunnerTelemetry::default());
+        let (sniper_telem_tx, sniper_telem_rx) = watch::channel(SniperTelemetry {
+            runner_id: sniper_id.clone(),
+            symbol: config.symbol.clone(),
+            enabled: config.sniper_enabled,
+            impulse_threshold_pct: config.sniper_hurdle_pct,
+            order_size_gbp: config.sniper_order_size_fiat,
+            total_snipes: 0,
+            successful_snipes: 0,
+            total_sniper_profit_gbp: Decimal::ZERO,
+            total_fees_paid_gbp: Decimal::ZERO,
+            average_lead_ms: 450,
+        });
+
+        let initial_orders = self.execution_client.get_active_orders().await.unwrap_or_default();
+        let grid_runner = grid_runner
+            .with_initial_active_orders(initial_orders)
+            .with_telemetry_channel(grid_telem_tx);
 
         // 5. Create Sniper Runner
         let sniper_config = SniperConfig {
@@ -129,7 +156,7 @@ impl RunnerManager {
             self.risk_engine.clone(),
             self.tick_broadcast.subscribe(),
             sniper_tune_rx,
-        );
+        ).with_telemetry_channel(sniper_telem_tx);
 
         // 6. Spawn independent Tokio tasks
         tokio::spawn(async move {
@@ -147,6 +174,8 @@ impl RunnerManager {
             sniper_runner_id: sniper_id,
             grid_tune_tx,
             sniper_tune_tx,
+            grid_telemetry_rx: grid_telem_rx,
+            sniper_telemetry_rx: sniper_telem_rx,
         };
 
         {
@@ -169,6 +198,9 @@ impl RunnerManager {
         paused: Option<bool>,
         step_pct: Option<Decimal>,
         rebalance_threshold_pct: Option<Decimal>,
+        order_size_fiat: Option<Decimal>,
+        dynamic_pricing_enabled: Option<bool>,
+        inventory_gamma: Option<Decimal>,
     ) -> bool {
         let map = self.pairs.read().await;
         for handle in map.values() {
@@ -182,6 +214,15 @@ impl RunnerManager {
                 }
                 if let Some(r) = rebalance_threshold_pct {
                     curr.rebalance_threshold_pct = Some(r);
+                }
+                if let Some(sz) = order_size_fiat {
+                    curr.order_size_fiat = Some(sz);
+                }
+                if let Some(dyn_en) = dynamic_pricing_enabled {
+                    curr.dynamic_pricing_enabled = Some(dyn_en);
+                }
+                if let Some(gamma) = inventory_gamma {
+                    curr.inventory_gamma = Some(gamma);
                 }
                 let _ = handle.grid_tune_tx.send(curr);
                 return true;
@@ -199,7 +240,10 @@ impl RunnerManager {
     ) -> bool {
         let map = self.pairs.read().await;
         for handle in map.values() {
-            if handle.sniper_runner_id == runner_id {
+            if handle.sniper_runner_id == runner_id
+                || handle.sniper_runner_id.starts_with(runner_id)
+                || runner_id.starts_with(&handle.sniper_runner_id)
+            {
                 let mut curr = handle.sniper_tune_tx.borrow().clone();
                 if let Some(en) = enabled {
                     curr.enabled = en;
@@ -220,7 +264,10 @@ impl RunnerManager {
     pub async fn toggle_sniper(&self, runner_id: &str, enabled: Option<bool>) -> Option<bool> {
         let map = self.pairs.read().await;
         for handle in map.values() {
-            if handle.sniper_runner_id == runner_id {
+            if handle.sniper_runner_id == runner_id
+                || handle.sniper_runner_id.starts_with(runner_id)
+                || runner_id.starts_with(&handle.sniper_runner_id)
+            {
                 let mut curr = handle.sniper_tune_tx.borrow().clone();
                 curr.enabled = enabled.unwrap_or(!curr.enabled);
                 let state = curr.enabled;
@@ -266,31 +313,37 @@ impl RunnerManager {
             let base = &handle.config.symbol.base;
             let inv_base = balances.get(base).copied().unwrap_or(Decimal::ZERO);
             let active_count = active_orders.iter().filter(|o| o.symbol == handle.config.symbol).count();
-            let is_paused = handle.grid_tune_tx.borrow().paused;
+            let grid_tune = handle.grid_tune_tx.borrow().clone();
+            let is_paused = grid_tune.paused;
+
+            let grid_snap = handle.grid_telemetry_rx.borrow().clone();
+            let sniper_snap = handle.sniper_telemetry_rx.borrow().clone();
 
             runners.push(RunnerTelemetryDto {
                 runner_id: handle.grid_runner_id.clone(),
                 symbol: sym_slash.clone(),
-                center_price: None,
-                inventory_base: inv_base,
-                realized_pnl: Decimal::ZERO,
-                total_trades: 0,
+                center_price: grid_snap.center_price,
+                inventory_base: if grid_snap.inventory_base > Decimal::ZERO { grid_snap.inventory_base } else { inv_base },
+                realized_pnl: grid_snap.realized_pnl,
+                total_trades: grid_snap.total_trades,
                 active_orders_count: active_count,
                 is_paused,
+                effective_center: grid_snap.effective_center,
+                dynamic_step_pct: if grid_snap.dynamic_step_pct > Decimal::ZERO { Some(grid_snap.dynamic_step_pct) } else { grid_tune.step_pct },
+                rolling_volatility_pct: if grid_snap.rolling_volatility_pct > Decimal::ZERO { Some(grid_snap.rolling_volatility_pct) } else { None },
             });
 
-            let sniper_state = handle.sniper_tune_tx.borrow().clone();
             snipers.push(SniperTelemetryDto {
                 runner_id: handle.sniper_runner_id.clone(),
                 symbol: sym_slash,
-                enabled: sniper_state.enabled,
-                impulse_threshold_pct: sniper_state.impulse_threshold_pct.unwrap_or(handle.config.sniper_hurdle_pct),
-                order_size_gbp: sniper_state.order_size_gbp.unwrap_or(handle.config.sniper_order_size_fiat),
-                total_snipes: 0,
-                successful_snipes: 0,
-                total_sniper_profit_gbp: Decimal::ZERO,
-                total_fees_paid_gbp: Decimal::ZERO,
-                average_lead_ms: 450,
+                enabled: sniper_snap.enabled,
+                impulse_threshold_pct: sniper_snap.impulse_threshold_pct,
+                order_size_gbp: sniper_snap.order_size_gbp,
+                total_snipes: sniper_snap.total_snipes,
+                successful_snipes: sniper_snap.successful_snipes,
+                total_sniper_profit_gbp: sniper_snap.total_sniper_profit_gbp,
+                total_fees_paid_gbp: sniper_snap.total_fees_paid_gbp,
+                average_lead_ms: sniper_snap.average_lead_ms,
             });
         }
 

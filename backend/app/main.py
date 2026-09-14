@@ -73,6 +73,9 @@ async def verify_engine_auth_middleware(request, call_next):
 class TuneRunnerRequest(BaseModel):
     step_pct: Optional[float] = None
     rebalance_threshold_pct: Optional[float] = None
+    order_size_fiat: Optional[float] = None
+    dynamic_pricing_enabled: Optional[bool] = None
+    inventory_gamma: Optional[float] = None
 
 class KillSwitchRequest(BaseModel):
     reason: str = "Manual Emergency Kill Switch Triggered via Dashboard"
@@ -120,6 +123,9 @@ async def tune_runner(runner_id: str, req: TuneRunnerRequest, mode: Optional[str
             runner_id,
             step_pct=req.step_pct,
             rebalance_threshold_pct=req.rebalance_threshold_pct,
+            order_size_fiat=req.order_size_fiat,
+            dynamic_pricing_enabled=req.dynamic_pricing_enabled,
+            inventory_gamma=req.inventory_gamma,
         )
     except Exception:
         pass
@@ -149,32 +155,42 @@ async def reset_circuit_breaker(mode: Optional[str] = None):
     return runner.reset_circuit_breaker()
 
 class TuneSniperRequest(BaseModel):
+    runner_id: Optional[str] = None
+    symbol: Optional[str] = None
     impulse_threshold_pct: Optional[float] = None
     snipe_order_size_gbp: Optional[float] = None
     min_net_edge_pct: Optional[float] = None
 
 class ToggleSniperRequest(BaseModel):
+    runner_id: Optional[str] = None
+    symbol: Optional[str] = None
     enabled: Optional[bool] = None
 
 @app.post("/api/sniper/toggle")
 async def toggle_sniper(req: Optional[ToggleSniperRequest] = None):
     enabled = req.enabled if req else None
+    target_id = req.runner_id if (req and req.runner_id) else "sniper_btc"
+    if req and req.symbol and not req.runner_id:
+        target_id = f"sniper_{req.symbol.lower().replace('/', '_').replace('-', '_')}"
     try:
-        await ipc_client.toggle_sniper("sniper_btc", enabled=enabled)
-    except Exception:
-        pass
+        await ipc_client.toggle_sniper(target_id, enabled=enabled)
+    except Exception as e:
+        logger.warning(f"Error toggling sniper {target_id}: {e}")
     return {"status": "success"}
 
 @app.post("/api/sniper/tune")
 async def tune_sniper(req: TuneSniperRequest):
+    target_id = req.runner_id if req.runner_id else "sniper_btc"
+    if req.symbol and not req.runner_id:
+        target_id = f"sniper_{req.symbol.lower().replace('/', '_').replace('-', '_')}"
     try:
         await ipc_client.tune_sniper(
-            "sniper_btc",
+            target_id,
             impulse_threshold_pct=req.impulse_threshold_pct,
             order_size_gbp=req.snipe_order_size_gbp,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Error tuning sniper {target_id}: {e}")
     return {"status": "success"}
 
 class ConfigureCapitalRequest(BaseModel):

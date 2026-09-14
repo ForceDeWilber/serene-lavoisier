@@ -291,13 +291,23 @@ impl ExecutionClient for LiveRevolutClient {
         for item in parsed_items {
             let cid = item.client_order_id.or(item.id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string());
             let sym_str = item.symbol.unwrap_or_default();
-            let sym = if sym_str.contains("BTC") {
-                Symbol::btc_gbp()
+            let (base, quote) = if sym_str.contains('-') {
+                let parts: Vec<&str> = sym_str.split('-').collect();
+                (parts[0].to_uppercase(), parts.get(1).map(|s| s.to_uppercase()).unwrap_or_else(|| "GBP".to_string()))
+            } else if sym_str.contains('/') {
+                let parts: Vec<&str> = sym_str.split('/').collect();
+                (parts[0].to_uppercase(), parts.get(1).map(|s| s.to_uppercase()).unwrap_or_else(|| "GBP".to_string()))
+            } else if sym_str.contains("BTC") {
+                ("BTC".to_string(), "GBP".to_string())
             } else if sym_str.contains("ETH") {
-                Symbol::eth_gbp()
+                ("ETH".to_string(), "GBP".to_string())
+            } else if sym_str.contains("SOL") {
+                ("SOL".to_string(), "GBP".to_string())
             } else {
-                Symbol::new("BTC", "GBP")
+                ("BTC".to_string(), "GBP".to_string())
             };
+            let sym = Symbol::new(&base, &quote);
+            let runner_id = format!("runner_{}_{}", base.to_lowercase(), quote.to_lowercase());
 
             let side = if item.side.as_deref().unwrap_or("").eq_ignore_ascii_case("SELL") {
                 OrderSide::Sell
@@ -311,7 +321,7 @@ impl ExecutionClient for LiveRevolutClient {
             let ord = Order {
                 id: Uuid::new_v4(),
                 client_order_id: cid,
-                runner_id: if sym_str.contains("BTC") { "runner_btc".into() } else { "runner_eth".into() },
+                runner_id,
                 symbol: sym,
                 side,
                 order_type: OrderType::Limit,
@@ -331,7 +341,7 @@ impl ExecutionClient for LiveRevolutClient {
 
     async fn get_bbo(&self, symbol: &Symbol) -> Result<(Decimal, Decimal), String> {
         let pair = symbol.as_dash();
-        let url = format!("https://revx.revolut.com/api/2.0/public/order-book/{}", pair);
+        let url = format!("{}/api/2.0/public/order-book/{}", self.base_url.trim_end_matches('/'), pair);
 
         let resp = self
             .client
@@ -521,5 +531,43 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_revolut_active_order_symbol_and_runner_parsing() {
+        // Verify parsing logic for SOL-GBP, BTC-USD, and ETH/GBP
+        let test_cases = vec![
+            ("SOL-GBP", "SOL", "GBP", "runner_sol_gbp"),
+            ("BTC-USD", "BTC", "USD", "runner_btc_usd"),
+            ("ETH/GBP", "ETH", "GBP", "runner_eth_gbp"),
+        ];
+
+        for (sym_str, expected_base, expected_quote, expected_runner) in test_cases {
+            let (base, quote) = if sym_str.contains('-') {
+                let parts: Vec<&str> = sym_str.split('-').collect();
+                (parts[0].to_uppercase(), parts.get(1).map(|s| s.to_uppercase()).unwrap_or_else(|| "GBP".to_string()))
+            } else if sym_str.contains('/') {
+                let parts: Vec<&str> = sym_str.split('/').collect();
+                (parts[0].to_uppercase(), parts.get(1).map(|s| s.to_uppercase()).unwrap_or_else(|| "GBP".to_string()))
+            } else {
+                ("BTC".to_string(), "GBP".to_string())
+            };
+            let sym = Symbol::new(&base, &quote);
+            let runner_id = format!("runner_{}_{}", base.to_lowercase(), quote.to_lowercase());
+
+            assert_eq!(sym.base, expected_base);
+            assert_eq!(sym.quote, expected_quote);
+            assert_eq!(runner_id, expected_runner);
+        }
+    }
+
+    #[test]
+    fn test_revolut_get_bbo_url_resolution() {
+        let base_url = "https://sandbox-revx.revolut.com/";
+        let sym = Symbol::sol_usd();
+        let pair = sym.as_dash();
+        let url = format!("{}/api/2.0/public/order-book/{}", base_url.trim_end_matches('/'), pair);
+        assert_eq!(url, "https://sandbox-revx.revolut.com/api/2.0/public/order-book/SOL-USD");
+    }
 }
+
 

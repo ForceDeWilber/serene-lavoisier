@@ -55,6 +55,7 @@ pub struct KrakenWsMultiplexer {
     tick_tx: broadcast::Sender<MarketTick>,
     sub_tx: tokio::sync::mpsc::UnboundedSender<Vec<Symbol>>,
     sub_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<Symbol>>,
+    bbo_cache: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<Symbol, (Decimal, Decimal, Decimal)>>>,
 }
 
 impl KrakenWsMultiplexer {
@@ -68,6 +69,7 @@ impl KrakenWsMultiplexer {
                 tick_tx,
                 sub_tx,
                 sub_rx,
+                bbo_cache: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             },
             tick_rx,
         )
@@ -205,9 +207,24 @@ impl KrakenWsMultiplexer {
                                 }
                             };
 
-                            let bid = parse_dec(item.bid.as_ref()).unwrap_or_default();
-                            let ask = parse_dec(item.ask.as_ref()).unwrap_or_default();
-                            let last = parse_dec(item.last.as_ref()).unwrap_or(bid);
+                            let new_bid = parse_dec(item.bid.as_ref());
+                            let new_ask = parse_dec(item.ask.as_ref());
+                            let new_last = parse_dec(item.last.as_ref());
+
+                            let (bid, ask, last) = {
+                                let mut cache = self.bbo_cache.lock().unwrap();
+                                let entry = cache.entry(symbol.clone()).or_insert((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
+                                if let Some(b) = new_bid {
+                                    if b > Decimal::ZERO { entry.0 = b; }
+                                }
+                                if let Some(a) = new_ask {
+                                    if a > Decimal::ZERO { entry.1 = a; }
+                                }
+                                if let Some(l) = new_last {
+                                    if l > Decimal::ZERO { entry.2 = l; }
+                                }
+                                *entry
+                            };
 
                             if bid > Decimal::ZERO || ask > Decimal::ZERO || last > Decimal::ZERO {
                                 let tick = MarketTick {
@@ -229,3 +246,32 @@ impl KrakenWsMultiplexer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_kraken_tick_partial_update_bbo_cache() {
+        let (multiplexer, mut rx) = KrakenWsMultiplexer::new("wss://ws.kraken.com/v2", vec![Symbol::btc_usd()]);
+
+        // Frame 1: Full BBO
+        let frame1 = r#"{"channel":"ticker","type":"snapshot","data":[{"symbol":"BTC/USD","bid":50000.0,"ask":50010.0,"last":50005.0}]}"#;
+        multiplexer.handle_message(frame1);
+
+        let tick1 = rx.recv().await.unwrap();
+        assert_eq!(tick1.bid, Decimal::from_str("50000.0").unwrap());
+        assert_eq!(tick1.ask, Decimal::from_str("50010.0").unwrap());
+        assert_eq!(tick1.mid_price(), Decimal::from_str("50005.0").unwrap());
+
+        // Frame 2: Incremental update with only new bid (ask omitted)
+        let frame2 = r#"{"channel":"ticker","type":"update","data":[{"symbol":"BTC/USD","bid":50002.0}]}"#;
+        multiplexer.handle_message(frame2);
+
+        let tick2 = rx.recv().await.unwrap();
+        assert_eq!(tick2.bid, Decimal::from_str("50002.0").unwrap());
+        assert_eq!(tick2.ask, Decimal::from_str("50010.0").unwrap()); // Preserved from cache!
+        assert_eq!(tick2.mid_price(), Decimal::from_str("50006.0").unwrap());
+    }
+}
+

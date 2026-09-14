@@ -54,6 +54,9 @@ class EngineIpcClient:
         paused: Optional[bool] = None,
         step_pct: Optional[float] = None,
         rebalance_threshold_pct: Optional[float] = None,
+        order_size_fiat: Optional[float] = None,
+        dynamic_pricing_enabled: Optional[bool] = None,
+        inventory_gamma: Optional[float] = None,
     ) -> Dict[str, Any]:
         request = {
             "type": "TuneRunner",
@@ -62,6 +65,9 @@ class EngineIpcClient:
                 "paused": paused,
                 "step_pct": str(step_pct) if step_pct is not None else None,
                 "rebalance_threshold_pct": str(rebalance_threshold_pct) if rebalance_threshold_pct is not None else None,
+                "order_size_fiat": str(order_size_fiat) if order_size_fiat is not None else None,
+                "dynamic_pricing_enabled": dynamic_pricing_enabled,
+                "inventory_gamma": str(inventory_gamma) if inventory_gamma is not None else None,
             },
         }
         return await self._send_request(request)

@@ -152,4 +152,27 @@ mod tests {
         assert!(snipe.net_edge_pct > dec!(0.02));
         assert!(snipe.estimated_profit_gbp > Decimal::ZERO);
     }
+
+    #[test]
+    fn test_sniper_scratch_and_pnl_accounting() {
+        let config = SniperConfig::default();
+        let mut strategy = LeadLagSniperStrategy::new(config);
+
+        assert_eq!(strategy.total_snipes, 0);
+        assert_eq!(strategy.successful_snipes, 0);
+
+        // Record a successful snipe
+        strategy.record_snipe_result(dec!(1.50), dec!(0.05), 320);
+        assert_eq!(strategy.total_snipes, 1);
+        assert_eq!(strategy.successful_snipes, 1);
+        assert_eq!(strategy.total_sniper_profit_gbp, dec!(1.50));
+        assert_eq!(strategy.total_taker_fees_paid_gbp, dec!(0.05));
+
+        // Record a scratched snipe with zero or negative PnL
+        strategy.record_snipe_result(dec!(-0.10), dec!(0.05), 800);
+        assert_eq!(strategy.total_snipes, 2);
+        assert_eq!(strategy.successful_snipes, 1); // Remains 1
+        assert_eq!(strategy.total_sniper_profit_gbp, dec!(1.40));
+    }
 }
+
