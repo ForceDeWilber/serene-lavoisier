@@ -17,7 +17,7 @@ class KrakenWsStreamer:
 
     def __init__(self, ws_url: str = "wss://ws.kraken.com/v2", symbols: Optional[list] = None):
         self.ws_url = ws_url
-        self.symbols = symbols or ["BTC/USD", "ETH/USD", "SOL/USD", "BTC/GBP", "ETH/GBP", "SOL/GBP"]
+        self.symbols = symbols or []
         self.live_ticks: Dict[str, Dict[str, Any]] = {}
         self.connected: bool = False
         self.last_connected_at: float = 0.0

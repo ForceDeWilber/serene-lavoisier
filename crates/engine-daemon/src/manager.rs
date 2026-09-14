@@ -91,6 +91,7 @@ impl RunnerManager {
             order_size_fiat: Some(config.order_size_fiat),
             dynamic_pricing_enabled: Some(true),
             inventory_gamma: Some(dec!(0.08)),
+            mode: None,
         });
 
         let (sniper_tune_tx, sniper_tune_rx) = watch::channel(SniperTuningUpdate {
@@ -108,6 +109,7 @@ impl RunnerManager {
             order_size_gbp: config.order_size_fiat,
             rebalance_threshold_pct: config.rebalance_threshold_pct,
             dynamic_pricing: trading_core::strategy::DynamicPricingConfig::default(),
+            mode: None,
         };
 
         let grid_runner = GridRunner::new(
@@ -229,6 +231,80 @@ impl RunnerManager {
             }
         }
         false
+    }
+
+    pub async fn set_runner_mode(&self, runner_id: &str, mode: &str) -> bool {
+        let map = self.pairs.read().await;
+        for handle in map.values() {
+            if handle.grid_runner_id == runner_id {
+                let mut curr = handle.grid_tune_tx.borrow().clone();
+                curr.mode = Some(mode.to_string());
+                let _ = handle.grid_tune_tx.send(curr);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub async fn remove_pair(&self, runner_id: &str) -> bool {
+        let mut map = self.pairs.write().await;
+        // find symbol to remove
+        let mut target_sym = None;
+        for (sym, handle) in map.iter() {
+            if handle.grid_runner_id == runner_id {
+                target_sym = Some(sym.clone());
+                // Tell runners to pause/stop by tuning
+                let mut curr_grid = handle.grid_tune_tx.borrow().clone();
+                curr_grid.paused = true;
+                let _ = handle.grid_tune_tx.send(curr_grid);
+                
+                let mut curr_sniper = handle.sniper_tune_tx.borrow().clone();
+                curr_sniper.enabled = false;
+                let _ = handle.sniper_tune_tx.send(curr_sniper);
+                break;
+            }
+        }
+        
+        if let Some(sym) = target_sym {
+            map.remove(&sym);
+            if let Some(ref db) = self.db_store {
+                let _ = db.delete_pair_config(&sym).await;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn liquidate_pair(&self, runner_id: &str) -> anyhow::Result<()> {
+        let map = self.pairs.read().await;
+        for handle in map.values() {
+            if handle.grid_runner_id == runner_id {
+                // Pause it so it stops trading
+                let mut curr = handle.grid_tune_tx.borrow().clone();
+                curr.paused = true;
+                let _ = handle.grid_tune_tx.send(curr);
+                
+                // Get balances
+                if let Ok(bals) = self.execution_client.get_balances().await {
+                    let base = handle.config.symbol.base.clone();
+                    if let Some(qty) = bals.get(&base) {
+                        if *qty > dec!(0.0) {
+                            // Market sell
+                            let order = trading_core::model::Order::new_market(
+                                &handle.grid_runner_id,
+                                handle.config.symbol.clone(),
+                                trading_core::model::OrderSide::Sell,
+                                *qty,
+                            );
+                            let _ = self.execution_client.submit_taker_order(&order).await;
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        }
+        Err(anyhow::anyhow!("Runner not found"))
     }
 
     pub async fn tune_sniper(

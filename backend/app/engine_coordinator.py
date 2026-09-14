@@ -29,11 +29,33 @@ class TradingEngineCoordinator:
 
     async def start(self):
         logger.info(f"Starting Trading Engine Coordinator in [{self.mode_config}] mode (Rust Core)...")
+        from app.database import get_db, LiveSessionLocal, PaperSessionLocal
+        from app.models import PairConfiguration
+        from sqlalchemy import select
+        from app.trade_sync_service import trade_sync_service
+        
+        sessionmaker = LiveSessionLocal if self.mode_config == "LIVE" else PaperSessionLocal
+        try:
+            async with sessionmaker() as session:
+                result = await session.execute(select(PairConfiguration).where(PairConfiguration.is_active == True))
+                active_pairs = result.scalars().all()
+                for pair in active_pairs:
+                    if pair.symbol not in kraken_streamer.symbols:
+                        kraken_streamer.symbols.append(pair.symbol)
+        except Exception as e:
+            logger.error(f"Failed to load initial pair configurations: {e}")
+
         # Launch persistent Kraken Pro WS v2 streaming
         await kraken_streamer.start()
+        
+        # Launch Revolut X Trade Sync loop
+        if self.mode_config == "LIVE":
+            await trade_sync_service.start()
 
     async def stop(self):
         logger.info("Stopping Trading Engine Coordinator...")
+        from app.trade_sync_service import trade_sync_service
+        await trade_sync_service.stop()
         await kraken_streamer.stop()
 
     def get_runner(self, mode: Optional[str] = None):
@@ -56,112 +78,63 @@ class TradingEngineCoordinator:
                 snipers = payload.get("snipers", [])
                 active_orders = payload.get("active_orders", [])
 
-                gbp = bals.get("GBP", 0.0)
-                btc = bals.get("BTC", 0.0)
-                eth = bals.get("ETH", 0.0)
-                sol = bals.get("SOL", 0.0)
-
-                # Fetch real-time fluctuating Kraken Pro WS v2 prices without cached fallbacks
-                btc_p, btc_status, btc_disc, btc_tick = kraken_streamer.get_symbol_price("BTC/GBP")
-                eth_p, eth_status, eth_disc, eth_tick = kraken_streamer.get_symbol_price("ETH/GBP")
-                sol_p, sol_status, sol_disc, sol_tick = kraken_streamer.get_symbol_price("SOL/GBP")
-
-                btc_val = round(btc * btc_p, 2) if btc_p is not None else None
-                eth_val = round(eth * eth_p, 2) if eth_p is not None else None
-                sol_val = round(sol * sol_p, 2) if sol_p is not None else None
-
-                crypto_total = sum(v for v in [btc_val, eth_val, sol_val] if v is not None)
-                total_equity = round(gbp + crypto_total, 2)
-                sniper_dto = snipers[0] if snipers else {}
-
-                formatted_orders = []
-                for o in active_orders:
-                    try:
-                        px = float(o.get("price", 0.0))
-                        qty = float(o.get("qty", 0.0))
-                        val = float(o.get("value_gbp", px * qty))
-                        dist = float(o.get("distance_pct", 0.0))
-                        formatted_orders.append({
-                            "id": str(o.get("id", "")),
-                            "client_order_id": str(o.get("client_order_id", "")),
-                            "runner_id": str(o.get("runner_id", "")),
-                            "symbol": str(o.get("symbol", "")),
-                            "side": str(o.get("side", "BUY")).upper(),
-                            "price": px,
-                            "qty": qty,
-                            "value_gbp": val,
-                            "created_at": str(o.get("created_at", "")),
-                            "rung_level": int(o.get("rung_level", -1)),
-                            "distance_pct": dist,
-                            "is_live": bool(o.get("is_live", True)),
-                        })
-                    except Exception:
-                        continue
-
-                # Build live radar metrics for BTC/GBP, ETH/GBP, and SOL/GBP
-                def build_radar_item(sym: str, price: Optional[float], status_code: str, disc: Optional[str]):
-                    if price is None:
-                        return {
-                            "symbol": sym,
-                            "status": status_code,
-                            "disclaimer": disc or "No Data Received",
-                            "kraken_price": None,
-                            "revolut_best_bid": None,
-                            "revolut_best_ask": None,
-                            "revolut_spread_gbp": 0.0,
-                            "revolut_spread_pct": 0.0,
-                            "buy_opportunity_pct": 0.0,
-                            "sell_opportunity_pct": 0.0,
-                            "current_dislocation_pct": 0.0,
-                            "in_snipe_zone": False,
-                            "direction": "NO_DATA",
-                            "lead_advantage_ms": 0,
-                        }
-                    ask_markup = 1.0006 if "SOL" in sym else 1.0005
-                    bid_markdown = 0.9994 if "SOL" in sym else 0.9995
-                    rev_ask = round(price * ask_markup, 2)
-                    rev_bid = round(price * bid_markdown, 2)
-                    disloc = round(((price - rev_ask) / rev_ask) * 100.0, 3)
-                    return {
-                        "symbol": sym,
-                        "status": status_code,
-                        "disclaimer": disc,
-                        "kraken_price": price,
-                        "revolut_best_bid": rev_bid,
-                        "revolut_best_ask": rev_ask,
-                        "revolut_spread_gbp": round(rev_ask - rev_bid, 2),
-                        "revolut_spread_pct": round(((rev_ask - rev_bid) / rev_bid) * 100.0, 3),
-                        "buy_opportunity_pct": 0.12,
-                        "sell_opportunity_pct": 0.0,
-                        "current_dislocation_pct": disloc,
-                        "in_snipe_zone": disloc >= 0.11,
-                        "direction": "POSITIVE_DISLOCATION" if disloc > 0 else "NOMINAL",
-                        "lead_advantage_ms": 450,
-                    }
-
-                radar = {
-                    "BTC/GBP": build_radar_item("BTC/GBP", btc_p, btc_status, btc_disc),
-                    "ETH/GBP": build_radar_item("ETH/GBP", eth_p, eth_status, eth_disc),
-                    "SOL/GBP": build_radar_item("SOL/GBP", sol_p, sol_status, sol_disc),
-                }
-
+                # Dynamically fetch prices for all tracked symbols
+                crypto_total = 0.0
+                radar = {}
+                dynamic_activities = []
+                market_prices = {}
                 now_dt = datetime.now()
                 now_str = now_dt.strftime("%H:%M:%S")
 
-                # Dynamic micro-activity stream changing with live evaluations
-                dynamic_activities = []
-                for sym, p, status_code, disc in [
-                    ("BTC/GBP", btc_p, btc_status, btc_disc),
-                    ("ETH/GBP", eth_p, eth_status, eth_disc),
-                    ("SOL/GBP", sol_p, sol_status, sol_disc),
-                ]:
-                    r_item = radar[sym]
+                for sym in kraken_streamer.symbols:
+                    p, status_code, disc, tick = kraken_streamer.get_symbol_price(sym)
+                    market_prices[sym] = {
+                        "price": p,
+                        "status": status_code,
+                        "disclaimer": disc,
+                    }
+
+                    # Add to crypto_total if we have balance (assuming base asset balance)
+                    base_asset = sym.split("/")[0] if "/" in sym else sym.split("-")[0]
+                    bal = bals.get(base_asset, 0.0)
+                    if p is not None and bal > 0:
+                        crypto_total += round(bal * p, 2)
+
+                    # Build radar
+                    def build_radar_item(s: str, pr: Optional[float], st: str, di: Optional[str]):
+                        if pr is None:
+                            return {
+                                "symbol": s, "status": st, "disclaimer": di or "No Data Received",
+                                "kraken_price": None, "revolut_best_bid": None, "revolut_best_ask": None,
+                                "revolut_spread_gbp": 0.0, "revolut_spread_pct": 0.0,
+                                "buy_opportunity_pct": 0.0, "sell_opportunity_pct": 0.0,
+                                "current_dislocation_pct": 0.0, "in_snipe_zone": False,
+                                "direction": "NO_DATA", "lead_advantage_ms": 0,
+                            }
+                        ask_markup = 1.0006 if "SOL" in s else 1.0005
+                        bid_markdown = 0.9994 if "SOL" in s else 0.9995
+                        rev_ask = round(pr * ask_markup, 2)
+                        rev_bid = round(pr * bid_markdown, 2)
+                        disloc = round(((pr - rev_ask) / rev_ask) * 100.0, 3)
+                        return {
+                            "symbol": s, "status": st, "disclaimer": di,
+                            "kraken_price": pr, "revolut_best_bid": rev_bid, "revolut_best_ask": rev_ask,
+                            "revolut_spread_gbp": round(rev_ask - rev_bid, 2),
+                            "revolut_spread_pct": round(((rev_ask - rev_bid) / rev_bid) * 100.0, 3),
+                            "buy_opportunity_pct": 0.12, "sell_opportunity_pct": 0.0,
+                            "current_dislocation_pct": disloc, "in_snipe_zone": disloc >= 0.11,
+                            "direction": "POSITIVE_DISLOCATION" if disloc > 0 else "NOMINAL",
+                            "lead_advantage_ms": 450,
+                        }
+
+                    r_item = build_radar_item(sym, p, status_code, disc)
+                    radar[sym] = r_item
+
+                    # Build dynamic activities
                     if status_code == "LIVE" and p is not None:
                         disloc = r_item["current_dislocation_pct"]
                         dynamic_activities.append({
-                            "id": f"act_{sym}",
-                            "time": now_str,
-                            "pair": sym,
+                            "id": f"act_{sym}", "time": now_str, "pair": sym,
                             "event": f"Tick £{p:,.2f} (WS Live)",
                             "spread_eval": f"Dislocation {disloc:+.3f}% vs +0.110% hurdle",
                             "status": "TRIGGERED" if disloc >= 0.11 else "MONITORING",
@@ -169,39 +142,33 @@ class TradingEngineCoordinator:
                         })
                     elif status_code == "OUTDATED" and p is not None:
                         dynamic_activities.append({
-                            "id": f"act_{sym}",
-                            "time": now_str,
-                            "pair": sym,
+                            "id": f"act_{sym}", "time": now_str, "pair": sym,
                             "event": f"Price £{p:,.2f} [{disc}]",
                             "spread_eval": "Awaiting fresh tick",
-                            "status": "OUTDATED",
-                            "disclaimer": disc,
+                            "status": "OUTDATED", "disclaimer": disc,
                         })
                     else:
                         dynamic_activities.append({
-                            "id": f"act_{sym}",
-                            "time": now_str,
-                            "pair": sym,
+                            "id": f"act_{sym}", "time": now_str, "pair": sym,
                             "event": "Connecting to Kraken WS v2",
                             "spread_eval": "No Data Received",
-                            "status": "NO_DATA",
-                            "disclaimer": "No Data Received",
+                            "status": "NO_DATA", "disclaimer": "No Data Received",
                         })
 
-                btc_disloc_str = f"{radar['BTC/GBP']['current_dislocation_pct']:+.3f}%" if btc_p is not None else "No Data"
-                eth_disloc_str = f"{radar['ETH/GBP']['current_dislocation_pct']:+.3f}%" if eth_p is not None else "No Data"
-                sol_disloc_str = f"{radar['SOL/GBP']['current_dislocation_pct']:+.3f}%" if sol_p is not None else "No Data"
+                gbp = bals.get("GBP", 0.0)
+                total_equity = round(gbp + crypto_total, 2)
+                sniper_dto = snipers[0] if snipers else {}
 
                 engine_activity = {
                     "title": "Sub-Second Ingestion & Dislocation Scanner",
                     "status": "STREAMING" if kraken_streamer.connected else "CONNECTING",
                     "status_code": "ACTIVE" if kraken_streamer.connected else "CONNECTING",
-                    "summary": f"Kraken Pro WS v2 streaming. Dislocation vs +0.110% hurdle: BTC {btc_disloc_str}, ETH {eth_disloc_str}, SOL {sol_disloc_str}. 0 resting orders. Standing by.",
+                    "summary": f"Kraken Pro WS v2 streaming {len(kraken_streamer.symbols)} pairs. Standing by.",
                     "timestamp": now_str,
                     "oracle_latency_ms": 12 if kraken_streamer.connected else 0,
                     "drawdown_pct": 0.0,
                     "circuit_breaker": "NORMAL",
-                    "pairs_monitored": 3,
+                    "pairs_monitored": len(kraken_streamer.symbols),
                     "target_hurdle_pct": 0.110,
                     "activities": dynamic_activities,
                 }
@@ -218,39 +185,46 @@ class TradingEngineCoordinator:
                     }
                 ]
 
-                # Realistic execution trade history matching account acquisitions
-                live_trades = [
-                    {
-                        "id": "tr_101",
-                        "timestamp": "12:42:15",
-                        "symbol": "BTC/GBP",
-                        "side": "BUY",
-                        "price": 56412.50,
-                        "qty": 0.00005849,
-                        "value_gbp": 3.30,
-                        "fee_gbp": 0.003,
-                        "pnl_gbp": 0.00,
-                        "strategy": "Lead-Lag Dislocation",
-                    },
-                    {
-                        "id": "tr_102",
-                        "timestamp": "12:38:04",
-                        "symbol": "ETH/GBP",
-                        "side": "BUY",
-                        "price": 1818.20,
-                        "qty": 0.00269105,
-                        "value_gbp": 4.89,
-                        "fee_gbp": 0.004,
-                        "pnl_gbp": 0.00,
-                        "strategy": "Lead-Lag Dislocation",
-                    },
-                ]
+                # Fetch realistic execution trade history from DB
+                live_trades = []
+                try:
+                    from sqlalchemy import select
+                    from app.database import LiveSessionLocal, PaperSessionLocal
+                    from app.models import TradeRecord
+                    
+                    session_maker = LiveSessionLocal if is_live else PaperSessionLocal
+                    async with session_maker() as session:
+                        result = await session.execute(
+                            select(TradeRecord)
+                            .order_by(TradeRecord.execution_time.desc())
+                            .limit(50)
+                        )
+                        records = result.scalars().all()
+                        for r in records:
+                            live_trades.append({
+                                "id": r.id,
+                                "timestamp": r.execution_time.strftime("%H:%M:%S") if r.execution_time else "",
+                                "symbol": r.symbol,
+                                "side": r.side,
+                                "price": r.price,
+                                "qty": r.qty,
+                                "value_gbp": r.value_gbp,
+                                "fee_gbp": r.fee_gbp,
+                                "pnl_gbp": r.realized_pnl_gbp,
+                                "fx_rate": r.fx_rate_to_gbp,
+                                "strategy": r.strategy_type,
+                            })
+                except Exception as e:
+                    logger.error(f"Failed to fetch live trades from DB: {e}")
 
                 status = "ACTIVE"
-                status_msg = f"Revolut X Live Connected (Rust Core). Balances: £{gbp:,.2f} GBP, {btc:.6f} BTC, {eth:.6f} ETH, {sol:.4f} SOL"
-                if is_live and gbp <= 0.0 and len(active_orders) == 0 and btc <= 0.0 and eth <= 0.0 and sol <= 0.0:
+                status_msg = f"Revolut X Live Connected (Rust Core). Total Equity: £{total_equity:,.2f} GBP"
+                
+                # Check if total equity minus GBP is 0 and GBP is 0
+                has_no_funds = gbp <= 0.0 and crypto_total <= 0.0
+                if is_live and has_no_funds and len(active_orders) == 0:
                     status = "INSUFFICIENT_FUNDS"
-                    status_msg = "Revolut X account has £0.00 available GBP balance."
+                    status_msg = "Revolut X account has £0.00 available GBP balance and no crypto assets."
 
                 return {
                     "mode": "live" if is_live else "paper",

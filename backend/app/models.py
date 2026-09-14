@@ -56,3 +56,24 @@ class PairConfiguration(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+class TradeRecord(Base):
+    __tablename__ = "trade_records"
+
+    id = Column(String, primary_key=True)  # Revolut X trade ID or order ID
+    client_order_id = Column(String, index=True)
+    symbol = Column(String, index=True)
+    side = Column(String)
+    price = Column(Float)
+    qty = Column(Float)
+    value_asset = Column(Float)
+    fee_asset = Column(Float)
+    
+    # FX fields for exact accounting
+    fx_rate_to_gbp = Column(Float, nullable=True) # E.g., if USD pair, the exact GBP/USD rate
+    value_gbp = Column(Float)
+    fee_gbp = Column(Float)
+    realized_pnl_gbp = Column(Float, default=0.0)
+    
+    strategy_type = Column(String, default="Lead-Lag Dislocation")
+    execution_time = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

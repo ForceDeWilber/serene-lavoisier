@@ -114,12 +114,45 @@ class EngineIpcClient:
         }
         return await self._send_request(request)
 
-    async def add_pair(self, pair_config: Dict[str, Any]) -> Dict[str, Any]:
+    async def add_pair(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
+        # ensure numericals are stringified for decimal parsing in rust
+        for k in ["envelope_capital", "grid_step_pct", "order_size_fiat", "rebalance_threshold_pct", "sniper_order_size_fiat", "sniper_hurdle_pct"]:
+            if k in config_dict and isinstance(config_dict[k], float):
+                config_dict[k] = str(config_dict[k])
+                
         request = {
             "type": "AddPair",
             "payload": {
-                "config": pair_config,
-            },
+                "config": config_dict
+            }
+        }
+        return await self._send_request(request)
+
+    async def set_runner_mode(self, runner_id: str, mode: str) -> Dict[str, Any]:
+        request = {
+            "type": "SetRunnerMode",
+            "payload": {
+                "runner_id": runner_id,
+                "mode": mode,
+            }
+        }
+        return await self._send_request(request)
+
+    async def liquidate_pair(self, runner_id: str) -> Dict[str, Any]:
+        request = {
+            "type": "LiquidatePair",
+            "payload": {
+                "runner_id": runner_id,
+            }
+        }
+        return await self._send_request(request)
+
+    async def remove_pair(self, runner_id: str) -> Dict[str, Any]:
+        request = {
+            "type": "RemovePair",
+            "payload": {
+                "runner_id": runner_id,
+            }
         }
         return await self._send_request(request)
 
@@ -131,4 +164,3 @@ class EngineIpcClient:
         return await self._send_request(request)
 
 ipc_client = EngineIpcClient()
-

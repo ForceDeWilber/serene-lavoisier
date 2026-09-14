@@ -215,6 +215,32 @@ impl Order {
         }
     }
 
+    pub fn new_market(
+        runner_id: impl Into<String>,
+        symbol: Symbol,
+        side: OrderSide,
+        qty: Decimal,
+    ) -> Self {
+        let now = Utc::now();
+        let id = Uuid::new_v4();
+        let client_order_id = id.to_string();
+        Self {
+            id,
+            client_order_id,
+            runner_id: runner_id.into(),
+            symbol,
+            side,
+            order_type: OrderType::Market,
+            price: Decimal::ZERO,
+            qty,
+            filled_qty: Decimal::ZERO,
+            post_only: false,
+            status: OrderStatus::New,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     pub fn remaining_qty(&self) -> Decimal {
         self.qty - self.filled_qty
     }

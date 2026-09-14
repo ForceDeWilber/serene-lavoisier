@@ -257,4 +257,15 @@ impl DbStore {
         )?;
         Ok(())
     }
+
+    pub async fn delete_pair_config(&self, symbol: &str) -> anyhow::Result<()> {
+        let conn = self.conn.clone();
+        let c = conn.lock().await;
+        c.execute(
+            "DELETE FROM pair_configurations WHERE symbol = ?1 OR venue_symbol = ?1",
+            params![symbol],
+        )?;
+        info!("Deleted pair configuration for {}", symbol);
+        Ok(())
+    }
 }

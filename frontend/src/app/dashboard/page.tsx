@@ -76,11 +76,13 @@ interface LiveTradeEvent {
   qty: number;
   value_gbp?: number;
   fee_gbp?: number;
+  fx_rate?: number;
   profit?: number;
   pnl_gbp?: number;
   strategy?: string;
   note?: string;
 }
+
 
 interface MarketPriceInfo {
   price: number | null;
@@ -526,27 +528,13 @@ export default function ProductionDashboard() {
   const ethBalance = telemetry?.balances?.ETH ?? 0;
   const solBalance = telemetry?.balances?.SOL ?? 0;
 
-  const btcPrice = telemetry?.market_prices?.["BTC/GBP"]?.price ?? null;
-  const ethPrice = telemetry?.market_prices?.["ETH/GBP"]?.price ?? null;
-  const solPrice = telemetry?.market_prices?.["SOL/GBP"]?.price ?? null;
+  const totalEquity = portfolio?.total_equity_gbp ?? gbpBalance;
+  
+  // Dynamically extract distinct assets from active runners or market prices
+  const trackedPairs = React.useMemo(() => {
+    return Object.keys(telemetry?.market_prices || {});
+  }, [telemetry?.market_prices]);
 
-  const btcStatus = telemetry?.market_prices?.["BTC/GBP"]?.status ?? "NO_DATA";
-  const ethStatus = telemetry?.market_prices?.["ETH/GBP"]?.status ?? "NO_DATA";
-  const solStatus = telemetry?.market_prices?.["SOL/GBP"]?.status ?? "NO_DATA";
-
-  const btcDisc = telemetry?.market_prices?.["BTC/GBP"]?.disclaimer ?? null;
-  const ethDisc = telemetry?.market_prices?.["ETH/GBP"]?.disclaimer ?? null;
-  const solDisc = telemetry?.market_prices?.["SOL/GBP"]?.disclaimer ?? null;
-
-  const btcValueGbp = btcPrice !== null ? btcBalance * btcPrice : null;
-  const ethValueGbp = ethPrice !== null ? ethBalance * ethPrice : null;
-  const solValueGbp = solPrice !== null ? solBalance * solPrice : null;
-
-  const cryptoSum = (btcValueGbp ?? 0) + (ethValueGbp ?? 0) + (solValueGbp ?? 0);
-  const totalEquityCalculated = gbpBalance + cryptoSum;
-  const totalEquity = portfolio?.total_equity_gbp ?? totalEquityCalculated;
-
-  // Single streamlined engine activity
   const engineActivity: EngineActivity = telemetry?.engine_activity || {
     title: "Sub-Second Ingestion & Dislocation Scanner",
     status: "STREAMING",
@@ -556,21 +544,19 @@ export default function ProductionDashboard() {
     oracle_latency_ms: telemetry?.latency_ms || 12,
     drawdown_pct: 0.0,
     circuit_breaker: cbTripped ? "TRIPPED" : "NORMAL",
-    pairs_monitored: 3,
+    pairs_monitored: trackedPairs.length,
     target_hurdle_pct: 0.110,
     activities: [],
   };
 
-  // Dynamically extract distinct assets from active runners
   const activeAssets = React.useMemo(() => {
     const set = new Set<string>();
-    (telemetry?.runners || []).forEach((r) => {
-      const base = r.symbol.split("/")[0] || r.symbol.split("-")[0];
+    trackedPairs.forEach(sym => {
+      const base = sym.split("/")[0] || sym.split("-")[0];
       if (base) set.add(base.toUpperCase());
     });
-    if (set.size === 0) return ["BTC", "ETH", "SOL"];
     return Array.from(set);
-  }, [telemetry?.runners]);
+  }, [trackedPairs]);
 
   const filteredOrders = restingOrders.filter((o) => {
     if (assetFilter === "ALL") return true;
@@ -584,12 +570,13 @@ export default function ProductionDashboard() {
 
   const liveUnconfigured = !telemetry?.authenticated || telemetry?.status === "UNCONFIGURED" || telemetry?.status === "AUTH_ERROR" || telemetry?.status === "ERROR";
   const isIpcDisconnected = telemetry?.status === "IPC_DISCONNECTED";
-  const liveUnfunded = telemetry?.authenticated && !isIpcDisconnected && (telemetry?.status === "INSUFFICIENT_FUNDS" || (gbpBalance <= 0.0 && btcBalance <= 0.0 && ethBalance <= 0.0 && solBalance <= 0.0));
+  const liveUnfunded = telemetry?.authenticated && !isIpcDisconnected && telemetry?.status === "INSUFFICIENT_FUNDS";
 
-  const trackedPairs = ["BTC/GBP", "ETH/GBP", "SOL/GBP"] as const;
+  const [mobileTab, setMobileTab] = useState<"dashboard" | "orders" | "history" | "config">("dashboard");
 
   return (
-    <main className="min-h-screen bg-[#0d1117] text-[#e6edf3] p-4 md:p-6 space-y-4 max-w-7xl mx-auto">
+    <main className="h-[100dvh] w-full bg-[#0d1117] text-[#e6edf3] flex flex-col overflow-hidden">
+      <div className="flex-1 overflow-y-auto p-2 md:p-6 space-y-4 pb-20 md:pb-6">
       {/* 1. Header: Clean Institutional Terminal */}
       <header className="bg-[#161b22] border border-[#30363d] rounded-xl px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3 shadow-sm">
         <div className="flex items-center gap-3">
@@ -760,7 +747,7 @@ export default function ProductionDashboard() {
       )}
 
       {/* 3. REVOLUT X ACCOUNT BALANCES (Multi-Asset: Cash, BTC, ETH, SOL) */}
-      <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm">
+      <section className={`bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm ${mobileTab === "dashboard" ? "block" : "hidden md:block"}`}>
         <div className="flex items-center justify-between border-b border-[#30363d]/60 pb-2.5 mb-3">
           <div className="flex items-center gap-2">
             <Coins className="w-4 h-4 text-[#58a6ff]" />
@@ -778,7 +765,7 @@ export default function ProductionDashboard() {
           </button>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
           {/* Total Account Equity */}
           <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
             <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
@@ -805,106 +792,81 @@ export default function ProductionDashboard() {
             </div>
           </div>
 
-          {/* Bitcoin (BTC) */}
+          {/* Net PnL */}
           <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
-            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider flex items-center justify-between">
-              <span>Bitcoin (BTC)</span>
-              {btcValueGbp !== null ? (
-                <span className="text-amber-400 font-mono">≈ £{btcValueGbp.toFixed(2)}</span>
-              ) : (
-                <span className="text-[#8b949e] font-mono text-[10px]">No Data</span>
-              )}
+            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
+              Net PnL
             </span>
-            <div className="text-lg font-mono font-bold text-amber-400 mt-1.5">
-              {btcBalance.toFixed(8)} <span className="text-xs text-[#8b949e]">BTC</span>
+            <div className={`text-xl font-mono font-bold mt-1.5 ${(telemetry?.portfolio?.total_pnl_gbp ?? 0) >= 0 ? "text-emerald-400" : "text-[#f85149]"}`}>
+              {(telemetry?.portfolio?.total_pnl_gbp ?? 0) >= 0 ? "+" : ""}£{Math.abs(telemetry?.portfolio?.total_pnl_gbp ?? 0).toFixed(2)}
             </div>
-            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 flex items-center gap-1.5">
-              {btcPrice !== null ? (
-                <>
-                  <span>@ £{btcPrice.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                  {btcStatus === "OUTDATED" && (
-                    <span className="text-[9px] px-1 py-0.2 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded" title={btcDisc || "Outdated"}>
-                      Outdated
-                    </span>
-                  )}
-                  {btcStatus === "LIVE" && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="Kraken WS v2 Live" />
-                  )}
-                </>
-              ) : (
-                <span className="text-[#8b949e]">No Data Received</span>
-              )}
+            <div className={`text-[11px] font-mono mt-0.5 ${(telemetry?.portfolio?.total_pnl_pct ?? 0) >= 0 ? "text-emerald-400/80" : "text-[#f85149]/80"}`}>
+              {(telemetry?.portfolio?.total_pnl_pct ?? 0) >= 0 ? "+" : ""}{(telemetry?.portfolio?.total_pnl_pct ?? 0).toFixed(2)}% Return
             </div>
           </div>
 
-          {/* Ethereum (ETH) */}
+          {/* Realized PnL */}
           <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
-            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider flex items-center justify-between">
-              <span>Ethereum (ETH)</span>
-              {ethValueGbp !== null ? (
-                <span className="text-purple-400 font-mono">≈ £{ethValueGbp.toFixed(2)}</span>
-              ) : (
-                <span className="text-[#8b949e] font-mono text-[10px]">No Data</span>
-              )}
+            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
+              Realized PnL
             </span>
-            <div className="text-lg font-mono font-bold text-purple-400 mt-1.5">
-              {ethBalance.toFixed(6)} <span className="text-xs text-[#8b949e]">ETH</span>
+            <div className={`text-xl font-mono font-bold mt-1.5 ${(telemetry?.portfolio?.total_realized_pnl_gbp ?? 0) >= 0 ? "text-emerald-400" : "text-[#f85149]"}`}>
+              {(telemetry?.portfolio?.total_realized_pnl_gbp ?? 0) >= 0 ? "+" : ""}£{Math.abs(telemetry?.portfolio?.total_realized_pnl_gbp ?? 0).toFixed(2)}
             </div>
-            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 flex items-center gap-1.5">
-              {ethPrice !== null ? (
-                <>
-                  <span>@ £{ethPrice.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                  {ethStatus === "OUTDATED" && (
-                    <span className="text-[9px] px-1 py-0.2 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded" title={ethDisc || "Outdated"}>
-                      Outdated
-                    </span>
-                  )}
-                  {ethStatus === "LIVE" && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="Kraken WS v2 Live" />
-                  )}
-                </>
-              ) : (
-                <span className="text-[#8b949e]">No Data Received</span>
-              )}
+            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5">
+              Locked profit
             </div>
           </div>
+        </div>
 
-          {/* Solana (SOL) */}
-          <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between col-span-2 md:col-span-1">
-            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider flex items-center justify-between">
-              <span>Solana (SOL)</span>
-              {solValueGbp !== null ? (
-                <span className="text-emerald-400 font-mono">≈ £{solValueGbp.toFixed(2)}</span>
-              ) : (
-                <span className="text-[#8b949e] font-mono text-[10px]">No Data</span>
-              )}
-            </span>
-            <div className="text-lg font-mono font-bold text-emerald-400 mt-1.5">
-              {solBalance.toFixed(4)} <span className="text-xs text-[#8b949e]">SOL</span>
-            </div>
-            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 flex items-center gap-1.5">
-              {solPrice !== null ? (
-                <>
-                  <span>@ £{solPrice.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                  {solStatus === "OUTDATED" && (
-                    <span className="text-[9px] px-1 py-0.2 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded" title={solDisc || "Outdated"}>
-                      Outdated
-                    </span>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {/* Dynamic Crypto Cards */}
+          {activeAssets.map(asset => {
+            const balance = telemetry?.balances?.[asset] ?? 0;
+            const priceInfo = telemetry?.market_prices?.[`${asset}/GBP`];
+            const price = priceInfo?.price ?? null;
+            const status = priceInfo?.status ?? "NO_DATA";
+            const disc = priceInfo?.disclaimer ?? null;
+            const valueGbp = price !== null ? balance * price : null;
+            
+            return (
+              <div key={asset} className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
+                <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider flex items-center justify-between">
+                  <span>{asset}</span>
+                  {valueGbp !== null ? (
+                    <span className="text-emerald-400 font-mono">≈ £{valueGbp.toFixed(2)}</span>
+                  ) : (
+                    <span className="text-[#8b949e] font-mono text-[10px]">No Data</span>
                   )}
-                  {solStatus === "LIVE" && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="Kraken WS v2 Live" />
+                </span>
+                <div className="text-lg font-mono font-bold text-emerald-400 mt-1.5">
+                  {balance.toFixed(6)} <span className="text-xs text-[#8b949e]">{asset}</span>
+                </div>
+                <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 flex items-center gap-1.5">
+                  {price !== null ? (
+                    <>
+                      <span>@ £{price.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      {status === "OUTDATED" && (
+                        <span className="text-[9px] px-1 py-0.2 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded" title={disc || "Outdated"}>
+                          Outdated
+                        </span>
+                      )}
+                      {status === "LIVE" && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="Kraken WS v2 Live" />
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-[#8b949e]">No Data Received</span>
                   )}
-                </>
-              ) : (
-                <span className="text-[#8b949e]">No Data Received</span>
-              )}
-            </div>
-          </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </section>
 
       {/* 4. DYNAMIC ENGINE OPERATIONAL STATE & ACTIVITY TICKER */}
-      <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-2.5">
+      <section className={`bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-2.5 ${mobileTab === "dashboard" ? "block" : "hidden md:block"}`}>
         <div className="flex items-center justify-between border-b border-[#30363d]/60 pb-2">
           <div className="flex items-center gap-2">
             <Cpu className="w-4 h-4 text-[#58a6ff]" />
@@ -1191,6 +1153,47 @@ export default function ProductionDashboard() {
                       <span className="text-[#c9d1d9]">800ms cancel on unfilled maker exit</span>
                     </div>
                   </div>
+
+                  {/* Lifecycle Management */}
+                  <div className="flex gap-2 pt-2 border-t border-[#30363d]/60">
+                    <button
+                      onClick={async () => {
+                        const runnerId = `runner_${sym.toLowerCase().replace("/", "_").replace("-", "_")}`;
+                        await fetch(`/api/proxy/runners/${runnerId}/mode`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ mode: "WIND_DOWN" }),
+                        });
+                        alert(`Wind Down initiated for ${sym}. No more buys will be placed.`);
+                      }}
+                      className="flex-1 py-1 text-[9px] font-semibold rounded bg-[#21262d] text-[#8b949e] hover:bg-amber-500/20 hover:text-amber-400 border border-[#30363d] transition"
+                    >
+                      SOFT SELL
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const runnerId = `runner_${sym.toLowerCase().replace("/", "_").replace("-", "_")}`;
+                        if(confirm(`Are you sure you want to hard sell all ${sym} inventory at market price?`)) {
+                          await fetch(`/api/proxy/runners/${runnerId}/liquidate`, { method: "POST" });
+                        }
+                      }}
+                      className="flex-1 py-1 text-[9px] font-semibold rounded bg-[#21262d] text-[#8b949e] hover:bg-[#f85149]/20 hover:text-[#f85149] border border-[#30363d] transition"
+                    >
+                      HARD SELL
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const runnerId = `runner_${sym.toLowerCase().replace("/", "_").replace("-", "_")}`;
+                        if(confirm(`Are you sure you want to stop tracking ${sym} completely?`)) {
+                          await fetch(`/api/proxy/pairs/${runnerId}`, { method: "DELETE" });
+                        }
+                      }}
+                      className="flex-1 py-1 text-[9px] font-semibold rounded bg-[#21262d] text-[#8b949e] hover:bg-[#8b949e]/20 hover:text-[#f0f6fc] border border-[#30363d] transition"
+                    >
+                      UNTRACK
+                    </button>
+                  </div>
+
                 </div>
               </div>
             );
@@ -1199,7 +1202,7 @@ export default function ProductionDashboard() {
       </section>
 
       {/* 6. COMPREHENSIVE TRADE & EXECUTION HISTORY TABLE */}
-      <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-3">
+      <section className={`bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-3 ${mobileTab === "history" ? "block" : "hidden md:block"}`}>
         <div className="flex items-center justify-between border-b border-[#30363d] pb-2.5">
           <div className="flex items-center gap-2">
             <FileText className="w-4 h-4 text-[#8b949e]" />
@@ -1237,8 +1240,9 @@ export default function ProductionDashboard() {
                 <th className="pb-2 font-normal">SIDE</th>
                 <th className="pb-2 font-normal text-right">PRICE</th>
                 <th className="pb-2 font-normal text-right">QUANTITY</th>
-                <th className="pb-2 font-normal text-right">TOTAL SPENT</th>
-                <th className="pb-2 font-normal text-right">FEE</th>
+                <th className="pb-2 font-normal text-right">EXEC FX</th>
+                <th className="pb-2 font-normal text-right">COST BASIS (GBP)</th>
+                <th className="pb-2 font-normal text-right">FEE (GBP)</th>
                 <th className="pb-2 font-normal text-right">NET PNL</th>
                 <th className="pb-2 font-normal text-right">STRATEGY</th>
               </tr>
@@ -1246,7 +1250,7 @@ export default function ProductionDashboard() {
             <tbody className="divide-y divide-[#30363d]/30 text-[11px]">
               {filteredTrades.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-[#8b949e] text-xs font-sans">
+                  <td colSpan={10} className="py-12 text-center text-[#8b949e] text-xs font-sans">
                     No executed trades recorded yet. Awaiting fills on Revolut X.
                   </td>
                 </tr>
@@ -1258,6 +1262,7 @@ export default function ProductionDashboard() {
                   const val = t.value_gbp ?? (price * qty);
                   const fee = t.fee_gbp ?? (val * 0.0009);
                   const pnl = t.pnl_gbp ?? t.profit ?? 0.0;
+                  const fx_rate = t.fx_rate ?? 1.0;
                   const timeStr = String(t.time_str || t.timestamp || "12:00:00");
                   const strat = t.strategy || (t.action?.includes("SNIPE") ? "Lead-Lag Dislocation" : "Maker Grid");
 
@@ -1273,9 +1278,12 @@ export default function ProductionDashboard() {
                         </span>
                       </td>
                       <td className="py-2 text-right text-[#f0f6fc]">
-                        £{price.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {price.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
                       </td>
                       <td className="py-2 text-right text-[#8b949e]">{qty}</td>
+                      <td className="py-2 text-right text-[#8b949e]">
+                        {fx_rate !== 1.0 ? fx_rate.toFixed(4) : "1.0000"}
+                      </td>
                       <td className="py-2 text-right font-medium text-[#f0f6fc]">
                         £{val.toFixed(2)}
                       </td>
@@ -1298,7 +1306,7 @@ export default function ProductionDashboard() {
       </section>
 
       {/* 7. LIVE RESTING ORDERS (Revolut X Spot Book) */}
-      <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-3">
+      <section className={`bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-3 ${mobileTab === "orders" ? "block" : "hidden md:block"}`}>
         <div className="flex items-center justify-between border-b border-[#30363d] pb-2.5">
           <div className="flex items-center gap-2">
             <Clock className="w-4 h-4 text-[#8b949e]" />
@@ -1327,60 +1335,77 @@ export default function ProductionDashboard() {
           </div>
         </div>
 
-        <div className="overflow-x-auto max-h-[300px] overflow-y-auto">
-          <table className="w-full text-left font-mono text-[11px]">
-            <thead className="text-[10px] text-[#8b949e] border-b border-[#30363d]/60 sticky top-0 bg-[#161b22]">
-              <tr>
-                <th className="pb-1.5 font-normal">SIDE</th>
-                <th className="pb-1.5 font-normal">PAIR</th>
-                <th className="pb-1.5 font-normal text-right">LIMIT PRICE</th>
-                <th className="pb-1.5 font-normal text-right">QUANTITY</th>
-                <th className="pb-1.5 font-normal text-right">VALUE (GBP)</th>
-                <th className="pb-1.5 font-normal text-right">DISTANCE</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#30363d]/30">
-              {filteredOrders.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="py-12 text-center text-[#8b949e] text-xs font-sans">
-                    No open resting limit orders on Revolut X.
-                  </td>
-                </tr>
-              ) : (
-                filteredOrders.map((ord) => {
-                  const isBuy = ord.side === "BUY";
-                  const priceNum = typeof ord.price === "number" ? ord.price : parseFloat(String(ord.price)) || 0;
-                  const qtyNum = typeof ord.qty === "number" ? ord.qty : parseFloat(String(ord.qty)) || 0;
-                  const distNum = typeof ord.distance_pct === "number" ? ord.distance_pct : parseFloat(String(ord.distance_pct)) || 0;
-                  const valNum = ord.value_gbp || (priceNum * qtyNum);
-                  return (
-                    <tr key={ord.id} className="hover:bg-[#21262d]/40 transition">
-                      <td className="py-1.5">
-                        <span className={`text-[10px] font-medium ${isBuy ? "text-emerald-400" : "text-[#f85149]"}`}>
-                          {ord.side}
+        <div className="max-h-[500px] overflow-y-auto pr-1">
+          {filteredOrders.length === 0 ? (
+            <div className="py-12 text-center text-[#8b949e] text-xs font-sans border border-[#30363d]/30 rounded-lg">
+              No open resting limit orders on Revolut X.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {Array.from(new Set(filteredOrders.map(o => o.symbol))).map(sym => {
+                const symOrders = filteredOrders.filter(o => o.symbol === sym);
+                const asks = symOrders.filter(o => o.side === "SELL").sort((a, b) => b.price - a.price);
+                const bids = symOrders.filter(o => o.side === "BUY").sort((a, b) => b.price - a.price);
+                const maxQty = Math.max(...symOrders.map(o => o.qty));
+                
+                return (
+                  <div key={sym} className="bg-[#0d1117] border border-[#30363d] rounded-lg overflow-hidden flex flex-col font-mono text-[10px]">
+                    <div className="bg-[#21262d] px-3 py-1.5 font-bold text-[#f0f6fc] text-xs border-b border-[#30363d] flex justify-between">
+                      <span>{sym} Order Book</span>
+                      <span className="text-[#8b949e] text-[9px]">{symOrders.length} Resting</span>
+                    </div>
+                    
+                    <div className="flex text-[#8b949e] px-2 py-1 border-b border-[#30363d]/40">
+                      <div className="flex-1">PRICE</div>
+                      <div className="flex-1 text-right">SIZE</div>
+                      <div className="flex-1 text-right">DIST</div>
+                    </div>
+
+                    <div className="flex flex-col flex-1 pb-1">
+                      {/* ASKS */}
+                      {asks.map(ask => {
+                        const w = maxQty > 0 ? (ask.qty / maxQty) * 100 : 0;
+                        return (
+                          <div key={ask.id} className="relative flex px-2 py-0.5 group">
+                            <div className="absolute top-0 bottom-0 right-0 bg-[#f85149]/10" style={{ width: `${w}%` }} />
+                            <div className="flex-1 text-[#f85149] z-10">{ask.price.toLocaleString("en-GB", { minimumFractionDigits: 2 })}</div>
+                            <div className="flex-1 text-right text-[#c9d1d9] z-10">{ask.qty.toFixed(6)}</div>
+                            <div className="flex-1 text-right text-[#f85149] z-10">+{ask.distance_pct.toFixed(2)}%</div>
+                          </div>
+                        )
+                      })}
+                      
+                      {/* SPREAD INDICATOR */}
+                      <div className="my-1.5 flex items-center justify-center border-y border-[#30363d]/40 py-1 bg-[#161b22]">
+                        <span className="text-[10px] text-[#8b949e] font-semibold">
+                          MARKET MID
                         </span>
-                      </td>
-                      <td className="py-1.5 text-[#8b949e]">{ord.symbol}</td>
-                      <td className="py-1.5 text-right font-medium text-[#f0f6fc]">
-                        £{priceNum.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </td>
-                      <td className="py-1.5 text-right text-[#8b949e]">{qtyNum}</td>
-                      <td className="py-1.5 text-right text-[#c9d1d9]">£{valNum.toFixed(2)}</td>
-                      <td className={`py-1.5 text-right ${distNum >= 0 ? "text-[#f85149]" : "text-emerald-400"}`}>
-                        {distNum >= 0 ? `+${distNum.toFixed(2)}%` : `${distNum.toFixed(2)}%`}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+                      </div>
+
+                      {/* BIDS */}
+                      {bids.map(bid => {
+                        const w = maxQty > 0 ? (bid.qty / maxQty) * 100 : 0;
+                        return (
+                          <div key={bid.id} className="relative flex px-2 py-0.5 group">
+                            <div className="absolute top-0 bottom-0 right-0 bg-emerald-500/10" style={{ width: `${w}%` }} />
+                            <div className="flex-1 text-emerald-400 z-10">{bid.price.toLocaleString("en-GB", { minimumFractionDigits: 2 })}</div>
+                            <div className="flex-1 text-right text-[#c9d1d9] z-10">{bid.qty.toFixed(6)}</div>
+                            <div className="flex-1 text-right text-emerald-400 z-10">{bid.distance_pct.toFixed(2)}%</div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
       </section>
 
-      {/* 8. PARAMETER CONFIGURATION (When viewMode === "tuning") */}
-      {viewMode === "tuning" && (
-        <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 space-y-4 shadow-sm">
+      {/* 8. PARAMETER CONFIGURATION (When viewMode === "tuning" or mobileTab === "config") */}
+      {(viewMode === "tuning" || mobileTab === "config") && (
+        <section className={`bg-[#161b22] border border-[#30363d] rounded-xl p-4 space-y-4 shadow-sm ${mobileTab === "config" ? "block" : "hidden md:block"}`}>
           <div className="flex items-center justify-between border-b border-[#30363d] pb-2.5">
             <div className="flex items-center gap-2">
               <Sliders className="w-4 h-4 text-[#8b949e]" />
@@ -1647,6 +1672,39 @@ export default function ProductionDashboard() {
           </div>
         </div>
       )}
+      </div>
+
+      {/* Mobile Bottom Navigation */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-[#161b22] border-t border-[#30363d] flex items-center justify-around pb-safe pt-1 z-40">
+        <button
+          onClick={() => setMobileTab("dashboard")}
+          className={`flex flex-col items-center p-2 flex-1 ${mobileTab === "dashboard" ? "text-emerald-400" : "text-[#8b949e]"}`}
+        >
+          <Activity className="w-5 h-5 mb-1" />
+          <span className="text-[9px] font-medium uppercase tracking-widest">Dash</span>
+        </button>
+        <button
+          onClick={() => setMobileTab("orders")}
+          className={`flex flex-col items-center p-2 flex-1 ${mobileTab === "orders" ? "text-emerald-400" : "text-[#8b949e]"}`}
+        >
+          <Clock className="w-5 h-5 mb-1" />
+          <span className="text-[9px] font-medium uppercase tracking-widest">Orders</span>
+        </button>
+        <button
+          onClick={() => setMobileTab("history")}
+          className={`flex flex-col items-center p-2 flex-1 ${mobileTab === "history" ? "text-emerald-400" : "text-[#8b949e]"}`}
+        >
+          <BarChart2 className="w-5 h-5 mb-1" />
+          <span className="text-[9px] font-medium uppercase tracking-widest">History</span>
+        </button>
+        <button
+          onClick={() => setMobileTab("config")}
+          className={`flex flex-col items-center p-2 flex-1 ${mobileTab === "config" ? "text-emerald-400" : "text-[#8b949e]"}`}
+        >
+          <Sliders className="w-5 h-5 mb-1" />
+          <span className="text-[9px] font-medium uppercase tracking-widest">Config</span>
+        </button>
+      </nav>
     </main>
   );
 }

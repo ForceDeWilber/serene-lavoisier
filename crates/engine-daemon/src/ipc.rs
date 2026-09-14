@@ -95,6 +95,16 @@ pub enum IpcRequest {
         reason: String,
     },
     ResetCircuitBreaker,
+    SetRunnerMode {
+        runner_id: String,
+        mode: String,
+    },
+    LiquidatePair {
+        runner_id: String,
+    },
+    RemovePair {
+        runner_id: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -377,6 +387,38 @@ impl IpcServer {
                         manager.reset_circuit_breaker().await;
                         IpcResponse::Ack {
                             message: "Circuit breaker reset. All pair runners resumed.".into(),
+                        }
+                    }
+                    IpcRequest::SetRunnerMode { runner_id, mode } => {
+                        if manager.set_runner_mode(&runner_id, &mode).await {
+                            IpcResponse::Ack {
+                                message: format!("Runner {} mode set to {}", runner_id, mode),
+                            }
+                        } else {
+                            IpcResponse::Error {
+                                error: format!("Runner {} not found", runner_id),
+                            }
+                        }
+                    }
+                    IpcRequest::LiquidatePair { runner_id } => {
+                        match manager.liquidate_pair(&runner_id).await {
+                            Ok(_) => IpcResponse::Ack {
+                                message: format!("Runner {} liquidated successfully", runner_id),
+                            },
+                            Err(e) => IpcResponse::Error {
+                                error: format!("Failed to liquidate runner {}: {}", runner_id, e),
+                            }
+                        }
+                    }
+                    IpcRequest::RemovePair { runner_id } => {
+                        if manager.remove_pair(&runner_id).await {
+                            IpcResponse::Ack {
+                                message: format!("Runner {} removed successfully", runner_id),
+                            }
+                        } else {
+                            IpcResponse::Error {
+                                error: format!("Runner {} not found for removal", runner_id),
+                            }
                         }
                     }
                 },

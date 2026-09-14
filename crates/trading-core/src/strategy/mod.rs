@@ -21,6 +21,7 @@ pub struct GridConfig {
     pub rebalance_threshold_pct: Decimal,// e.g. dec!(0.012) = 1.2%
     #[serde(default)]
     pub dynamic_pricing: DynamicPricingConfig,
+    pub mode: Option<String>,
 }
 
 pub struct GeometricGridStrategy {
@@ -99,8 +100,8 @@ impl GeometricGridStrategy {
         let mut new_orders = Vec::new();
         let one = dec!(1.0);
 
-        // Generate BUY rungs below effective reservation center price
-        if order_clip >= dec!(1.00) {
+        // Generate BUY rungs below effective reservation center price (unless winding down)
+        if order_clip >= dec!(1.00) && self.config.mode.as_deref() != Some("WIND_DOWN") {
             let mut current_buy_multiplier = one;
             for _ in 1..=self.config.rungs_per_side {
                 current_buy_multiplier *= one - dynamic_step;
@@ -199,6 +200,14 @@ impl GeometricGridStrategy {
                 // Realized profit calculation: (Sell Price - Buy Price) * Qty ~ step * notional
                 let profit = fill.price * fill.qty * dynamic_step;
                 self.realized_pnl += profit;
+
+                if self.config.mode.as_deref() == Some("WIND_DOWN") {
+                    info!(
+                        "[{}] Grid SELL filled @ £{} -> profit: £{:.4} -> No counter BUY (Winding Down)",
+                        self.config.runner_id, fill.price, profit
+                    );
+                    return None;
+                }
 
                 // Place counter BUY order 1 dynamic step below fill price
                 let counter_price = (fill.price * (one - dynamic_step)).round_dp(2);

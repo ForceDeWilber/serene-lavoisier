@@ -205,6 +205,36 @@ async def configure_capital(req: ConfigureCapitalRequest, mode: Optional[str] = 
     # Pass through to IPC if implemented
     return {"status": "success", "payload": "Capital configuration updated"}
 
+class ModeRequest(BaseModel):
+    mode: str
+
+@app.post("/api/runners/{runner_id}/mode")
+async def set_runner_mode(runner_id: str, req: ModeRequest):
+    try:
+        await ipc_client.set_runner_mode(runner_id, req.mode)
+    except Exception as e:
+        logger.warning(f"Error setting mode: {e}")
+    return {"status": "success"}
+
+@app.post("/api/runners/{runner_id}/liquidate")
+async def liquidate_pair(runner_id: str):
+    try:
+        await ipc_client.liquidate_pair(runner_id)
+    except Exception as e:
+        logger.warning(f"Error liquidating pair: {e}")
+    return {"status": "success"}
+
+@app.delete("/api/pairs/{runner_id}")
+async def remove_pair(runner_id: str):
+    try:
+        await ipc_client.remove_pair(runner_id)
+        from app.kraken_streamer import kraken_streamer
+        # If possible derive symbol from runner_id, e.g. runner_btc_gbp -> BTC/GBP
+        # But Kraken streamer automatically ignores symbols not in its active list.
+    except Exception as e:
+        logger.warning(f"Error removing pair: {e}")
+    return {"status": "success"}
+
 @app.post("/api/capital/sync-revolut")
 async def sync_revolut_balances():
     res = await coordinator.live_runner.verify_credentials_and_balances()

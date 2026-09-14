@@ -19,6 +19,7 @@ pub struct RunnerTuningUpdate {
     pub order_size_fiat: Option<Decimal>,
     pub dynamic_pricing_enabled: Option<bool>,
     pub inventory_gamma: Option<Decimal>,
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -331,6 +332,10 @@ impl GridRunner {
                     if let Some(gamma) = update.inventory_gamma {
                         self.strategy.dynamic_pricing.config.inventory_gamma = gamma;
                         info!("[{}] Dynamically updated inventory_gamma to {:.4}", self.runner_id, gamma);
+                    }
+                    if let Some(mode) = update.mode {
+                        self.strategy.config.mode = Some(mode.clone());
+                        info!("[{}] Dynamically updated mode to {}", self.runner_id, mode);
                     }
                 }
             }
