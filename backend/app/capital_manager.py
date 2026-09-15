@@ -1,11 +1,14 @@
 import os
 import time
+import json
 import base64
 import logging
+from pathlib import Path
 from typing import Dict, Any, Optional
 import httpx
 
 logger = logging.getLogger("trading_system.capital_manager")
+STATE_FILE = Path(__file__).resolve().parent.parent.parent / "capital_state.json"
 
 class CapitalManager:
     """
@@ -40,6 +43,47 @@ class CapitalManager:
             "REVOLUT_PRIVATE_KEY_PATH", "backend/credentials/revolut_private.pem"
         )
         self.revolut_base_url: str = os.getenv("REVOLUT_BASE_URL", "https://revx.revolut.com")
+
+        self._load_state()
+
+    def _load_state(self):
+        try:
+            if STATE_FILE.exists():
+                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if "starting_balance_gbp" in data:
+                        self.starting_balance_gbp = float(data["starting_balance_gbp"])
+                    if "profit_lock_pct" in data:
+                        self.profit_lock_pct = float(data["profit_lock_pct"])
+                    if "locked_profit_gbp" in data:
+                        self.locked_profit_gbp = float(data["locked_profit_gbp"])
+                    if "cumulative_profit_gbp" in data:
+                        self.cumulative_profit_gbp = float(data["cumulative_profit_gbp"])
+                    if "split_btc_pct" in data:
+                        self.split_btc_pct = float(data["split_btc_pct"])
+                    if "split_eth_pct" in data:
+                        self.split_eth_pct = float(data["split_eth_pct"])
+                    if "rungs_per_side" in data:
+                        self.rungs_per_side = int(data["rungs_per_side"])
+                logger.info(f"Loaded capital state from {STATE_FILE} (starting_balance_gbp: £{self.starting_balance_gbp:.2f})")
+        except Exception as e:
+            logger.warning(f"Failed to load capital state from {STATE_FILE}: {e}")
+
+    def _save_state(self):
+        try:
+            data = {
+                "starting_balance_gbp": self.starting_balance_gbp,
+                "profit_lock_pct": self.profit_lock_pct,
+                "locked_profit_gbp": self.locked_profit_gbp,
+                "cumulative_profit_gbp": self.cumulative_profit_gbp,
+                "split_btc_pct": self.split_btc_pct,
+                "split_eth_pct": self.split_eth_pct,
+                "rungs_per_side": self.rungs_per_side,
+            }
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save capital state to {STATE_FILE}: {e}")
 
     async def detect_balances(self) -> Dict[str, Any]:
         """
@@ -144,6 +188,7 @@ class CapitalManager:
         target_locked = round(self.cumulative_profit_gbp * self.profit_lock_pct, 2)
         if target_locked > self.locked_profit_gbp:
             self.locked_profit_gbp = target_locked
+        self._save_state()
 
     def get_active_trading_power(self) -> float:
         """
@@ -224,6 +269,7 @@ class CapitalManager:
         if rungs_per_side is not None and rungs_per_side >= 1:
             self.rungs_per_side = int(rungs_per_side)
 
+        self._save_state()
         return self.get_telemetry_dto()
 
     def get_telemetry_dto(self) -> Dict[str, Any]:
@@ -249,3 +295,6 @@ class CapitalManager:
             "split_eth_pct": self.split_eth_pct,
             "allocations": allocations,
         }
+
+capital_manager = CapitalManager()
+

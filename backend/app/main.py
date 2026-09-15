@@ -202,8 +202,23 @@ class ConfigureCapitalRequest(BaseModel):
 
 @app.post("/api/capital/configure")
 async def configure_capital(req: ConfigureCapitalRequest, mode: Optional[str] = None):
-    # Pass through to IPC if implemented
-    return {"status": "success", "payload": "Capital configuration updated"}
+    try:
+        from app.capital_manager import capital_manager
+        profit_lock_ratio = (req.profit_lock_pct / 100.0) if req.profit_lock_pct is not None and req.profit_lock_pct > 1.0 else req.profit_lock_pct
+        split_btc_ratio = (req.split_btc_pct / 100.0) if req.split_btc_pct is not None and req.split_btc_pct > 1.0 else req.split_btc_pct
+        split_eth_ratio = (req.split_eth_pct / 100.0) if req.split_eth_pct is not None and req.split_eth_pct > 1.0 else req.split_eth_pct
+        
+        dto = capital_manager.update_config(
+            profit_lock_pct=profit_lock_ratio,
+            split_btc_pct=split_btc_ratio,
+            split_eth_pct=split_eth_ratio,
+            starting_balance_gbp=req.starting_balance_gbp,
+            rungs_per_side=req.rungs_per_side,
+        )
+        return {"status": "success", "payload": dto}
+    except Exception as e:
+        logger.error(f"Error configuring capital: {e}")
+        return {"status": "error", "error": str(e)}
 
 class ModeRequest(BaseModel):
     mode: str

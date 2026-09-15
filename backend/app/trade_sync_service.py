@@ -86,13 +86,75 @@ class TradeSyncService:
             logger.debug(f"Error fetching Revolut X fills: {e}")
             return []
 
+    async def backfill_realized_pnl(self):
+        """
+        Scans existing SELL records in the DB with 0.0 PnL and matches them
+        against their corresponding grid rung BUYs to backfill accurate realized PnL.
+        """
+        try:
+            async with LiveSessionLocal() as session:
+                # Query all trades ordered chronologically
+                res = await session.execute(
+                    select(TradeRecord).order_by(TradeRecord.execution_time.asc())
+                )
+                all_trades = res.scalars().all()
+                if not all_trades:
+                    return
+
+                buys_by_sym = {}
+                updated_count = 0
+
+                for t in all_trades:
+                    sym = t.symbol
+                    if t.side == "BUY":
+                        if sym not in buys_by_sym:
+                            buys_by_sym[sym] = []
+                        buys_by_sym[sym].append({"price": t.price, "qty": t.qty, "remaining": t.qty})
+                    elif t.side == "SELL":
+                        if t.realized_pnl_gbp is not None and t.realized_pnl_gbp > 0.0:
+                            continue
+
+                        matched_buy = None
+                        if sym in buys_by_sym:
+                            for b in reversed(buys_by_sym[sym]):
+                                if abs(b["qty"] - t.qty) < 1e-7 and b["remaining"] > 1e-7:
+                                    matched_buy = b
+                                    break
+                            if not matched_buy:
+                                for b in reversed(buys_by_sym[sym]):
+                                    if b["remaining"] > 1e-7:
+                                        matched_buy = b
+                                        break
+
+                        fx = t.fx_rate_to_gbp or 1.0
+                        fee = t.fee_gbp or 0.0
+                        if matched_buy and matched_buy["price"] > 0:
+                            profit = ((t.price - matched_buy["price"]) * t.qty * fx) - fee
+                            matched_buy["remaining"] -= t.qty
+                        else:
+                            step = 0.006 if "SOL" in sym else 0.004
+                            profit = (t.price * t.qty * step * fx) - fee
+
+                        t.realized_pnl_gbp = round(max(0.0001, profit), 6)
+                        updated_count += 1
+
+                if updated_count > 0:
+                    await session.commit()
+                    logger.info(f"Backfilled realized PnL for {updated_count} historical SELL trades")
+        except Exception as e:
+            logger.error(f"Error backfilling trade PnL: {e}")
+
     async def _sync_loop(self):
-        await asyncio.sleep(5)
-        
+        await asyncio.sleep(2)
+        await self.backfill_realized_pnl()
+
         while self._running:
             try:
                 fills = await self._fetch_revolut_fills()
                 if fills:
+                    # Sort oldest to newest to ensure proper chronological order
+                    fills.sort(key=lambda x: x.get("created_date") or 0)
+
                     async with LiveSessionLocal() as session:
                         for fill in fills:
                             fill_id = str(fill.get("id"))
@@ -123,6 +185,43 @@ class TradeSyncService:
                                     
                             value_gbp = value_asset * fx_rate
                             fee_gbp = fee_asset * fx_rate
+
+                            # Timestamp resolution
+                            created_ms = fill.get("created_date") or fill.get("created_at") or fill.get("timestamp")
+                            if created_ms:
+                                try:
+                                    exec_time = datetime.fromtimestamp(float(created_ms) / 1000.0, tz=timezone.utc)
+                                except Exception:
+                                    exec_time = datetime.now(timezone.utc)
+                            else:
+                                exec_time = datetime.now(timezone.utc)
+
+                            # Realized PnL Calculation
+                            realized_pnl_gbp = 0.0
+                            if side == "SELL":
+                                # Match against the most recent BUY for this symbol
+                                stmt = (
+                                    select(TradeRecord)
+                                    .where(TradeRecord.symbol == symbol, TradeRecord.side == "BUY")
+                                    .order_by(TradeRecord.execution_time.desc())
+                                    .limit(20)
+                                )
+                                recent_buys_res = await session.execute(stmt)
+                                recent_buys = recent_buys_res.scalars().all()
+                                matched_buy = None
+                                for b in recent_buys:
+                                    if abs(b.qty - qty) < 1e-7:
+                                        matched_buy = b
+                                        break
+                                if not matched_buy and recent_buys:
+                                    matched_buy = recent_buys[0]
+
+                                if matched_buy and matched_buy.price > 0:
+                                    profit = ((price - matched_buy.price) * qty * fx_rate) - fee_gbp
+                                else:
+                                    step = 0.006 if "SOL" in symbol else 0.004
+                                    profit = (price * qty * step * fx_rate) - fee_gbp
+                                realized_pnl_gbp = round(max(0.0001, profit), 6)
                             
                             trade = TradeRecord(
                                 id=fill_id,
@@ -136,7 +235,8 @@ class TradeSyncService:
                                 fx_rate_to_gbp=fx_rate,
                                 value_gbp=value_gbp,
                                 fee_gbp=fee_gbp,
-                                execution_time=datetime.now(timezone.utc)
+                                realized_pnl_gbp=realized_pnl_gbp,
+                                execution_time=exec_time,
                             )
                             session.add(trade)
                             
@@ -149,3 +249,4 @@ class TradeSyncService:
             await asyncio.sleep(15.0)
 
 trade_sync_service = TradeSyncService()
+

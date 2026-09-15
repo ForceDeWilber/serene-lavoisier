@@ -64,7 +64,7 @@ impl LiveRevolutClient {
             .build()
             .map_err(|e| e.to_string())?;
 
-        let rate_limiter = TokenBucketRateLimiter::new(30.0, 900.0);
+        let rate_limiter = TokenBucketRateLimiter::new(10.0, 540.0);
 
         Ok(Self {
             base_url: base_url.into(),
@@ -76,7 +76,8 @@ impl LiveRevolutClient {
         })
     }
 
-    async fn send_order(&self, order: &Order, is_post_only: bool) -> Result<Order, String> {
+    /// Dispatches a raw post-only or aggressive limit order directly to Revolut X venue
+    pub async fn send_order(&self, order: &Order, is_post_only: bool) -> Result<Order, String> {
         self.rate_limiter.acquire().await;
 
         let execution_instructions = if is_post_only {
@@ -104,7 +105,7 @@ impl LiveRevolutClient {
         let signature = self.signer.sign_payload(timestamp, "POST", path, &body_str);
 
         let url = format!("{}{}", self.base_url, path);
-        let resp = self
+        let mut resp = self
             .client
             .post(&url)
             .header("X-Revx-API-Key", self.signer.api_key())
@@ -112,10 +113,30 @@ impl LiveRevolutClient {
             .header("X-Revx-Signature", signature)
             .header(header::ACCEPT, "application/json")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(body_str)
+            .body(body_str.clone())
             .send()
             .await
             .map_err(|e| format!("HTTP order POST error: {}", e))?;
+
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            tracing::warn!("[RATE-LIMIT] Revolut X 429 on send_order, backing off 600ms and retrying once...");
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            self.rate_limiter.acquire().await;
+            let ts2 = Utc::now().timestamp_millis();
+            let sig2 = self.signer.sign_payload(ts2, "POST", path, &body_str);
+            resp = self
+                .client
+                .post(&url)
+                .header("X-Revx-API-Key", self.signer.api_key())
+                .header("X-Revx-Timestamp", ts2.to_string())
+                .header("X-Revx-Signature", sig2)
+                .header(header::ACCEPT, "application/json")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body_str)
+                .send()
+                .await
+                .map_err(|e| format!("HTTP order POST retry error: {}", e))?;
+        }
 
         if !resp.status().is_success() {
             let status = resp.status();

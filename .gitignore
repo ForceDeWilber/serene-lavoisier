@@ -18,4 +18,5 @@ __pycache__/
 *.pem
 logs/
 .pids.json
+capital_state.json
 backend/credentials/
