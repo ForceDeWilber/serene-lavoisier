@@ -1344,9 +1344,13 @@ export default function ProductionDashboard() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {Array.from(new Set(filteredOrders.map(o => o.symbol))).map(sym => {
                 const symOrders = filteredOrders.filter(o => o.symbol === sym);
-                const asks = symOrders.filter(o => o.side === "SELL").sort((a, b) => b.price - a.price);
-                const bids = symOrders.filter(o => o.side === "BUY").sort((a, b) => b.price - a.price);
-                const maxQty = Math.max(...symOrders.map(o => o.qty));
+                const asks = symOrders
+                  .filter(o => o.side === "SELL")
+                  .sort((a, b) => (Number(b.price) || 0) - (Number(a.price) || 0));
+                const bids = symOrders
+                  .filter(o => o.side === "BUY")
+                  .sort((a, b) => (Number(b.price) || 0) - (Number(a.price) || 0));
+                const maxQty = Math.max(...symOrders.map(o => Number(o.qty) || 0), 0.000001);
                 
                 return (
                   <div key={sym} className="bg-[#0d1117] border border-[#30363d] rounded-lg overflow-hidden flex flex-col font-mono text-[10px]">
@@ -1364,13 +1368,16 @@ export default function ProductionDashboard() {
                     <div className="flex flex-col flex-1 pb-1">
                       {/* ASKS */}
                       {asks.map(ask => {
-                        const w = maxQty > 0 ? (ask.qty / maxQty) * 100 : 0;
+                        const pNum = typeof ask.price === "number" ? ask.price : parseFloat(String(ask.price)) || 0;
+                        const qNum = typeof ask.qty === "number" ? ask.qty : parseFloat(String(ask.qty)) || 0;
+                        const dNum = typeof ask.distance_pct === "number" ? ask.distance_pct : parseFloat(String(ask.distance_pct)) || 0;
+                        const w = maxQty > 0 ? (qNum / maxQty) * 100 : 0;
                         return (
                           <div key={ask.id} className="relative flex px-2 py-0.5 group">
                             <div className="absolute top-0 bottom-0 right-0 bg-[#f85149]/10" style={{ width: `${w}%` }} />
-                            <div className="flex-1 text-[#f85149] z-10">{ask.price.toLocaleString("en-GB", { minimumFractionDigits: 2 })}</div>
-                            <div className="flex-1 text-right text-[#c9d1d9] z-10">{ask.qty.toFixed(6)}</div>
-                            <div className="flex-1 text-right text-[#f85149] z-10">+{ask.distance_pct.toFixed(2)}%</div>
+                            <div className="flex-1 text-[#f85149] z-10">{pNum.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                            <div className="flex-1 text-right text-[#c9d1d9] z-10">{qNum.toFixed(6)}</div>
+                            <div className="flex-1 text-right text-[#f85149] z-10">+{dNum.toFixed(2)}%</div>
                           </div>
                         )
                       })}
@@ -1384,13 +1391,16 @@ export default function ProductionDashboard() {
 
                       {/* BIDS */}
                       {bids.map(bid => {
-                        const w = maxQty > 0 ? (bid.qty / maxQty) * 100 : 0;
+                        const pNum = typeof bid.price === "number" ? bid.price : parseFloat(String(bid.price)) || 0;
+                        const qNum = typeof bid.qty === "number" ? bid.qty : parseFloat(String(bid.qty)) || 0;
+                        const dNum = typeof bid.distance_pct === "number" ? bid.distance_pct : parseFloat(String(bid.distance_pct)) || 0;
+                        const w = maxQty > 0 ? (qNum / maxQty) * 100 : 0;
                         return (
                           <div key={bid.id} className="relative flex px-2 py-0.5 group">
                             <div className="absolute top-0 bottom-0 right-0 bg-emerald-500/10" style={{ width: `${w}%` }} />
-                            <div className="flex-1 text-emerald-400 z-10">{bid.price.toLocaleString("en-GB", { minimumFractionDigits: 2 })}</div>
-                            <div className="flex-1 text-right text-[#c9d1d9] z-10">{bid.qty.toFixed(6)}</div>
-                            <div className="flex-1 text-right text-emerald-400 z-10">{bid.distance_pct.toFixed(2)}%</div>
+                            <div className="flex-1 text-emerald-400 z-10">{pNum.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                            <div className="flex-1 text-right text-[#c9d1d9] z-10">{qNum.toFixed(6)}</div>
+                            <div className="flex-1 text-right text-emerald-400 z-10">{dNum.toFixed(2)}%</div>
                           </div>
                         )
                       })}
