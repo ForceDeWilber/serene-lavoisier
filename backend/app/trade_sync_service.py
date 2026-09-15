@@ -46,7 +46,11 @@ class TradeSyncService:
             private_key = serialization.load_pem_private_key(f.read(), password=None)
 
         timestamp = str(int(time.time() * 1000))
-        payload_str = f"{timestamp}{method}{path}"
+        clean_path = path
+        query = ""
+        if "?" in path:
+            clean_path, query = path.split("?", 1)
+        payload_str = f"{timestamp}{method.upper()}{clean_path}{query}"
         signature_bytes = private_key.sign(payload_str.encode("utf-8"))
         signature_b64 = base64.b64encode(signature_bytes).decode("utf-8")
         return timestamp, signature_b64
@@ -57,7 +61,7 @@ class TradeSyncService:
 
         try:
             method = "GET"
-            path = "/api/1.0/orders?status=FILLED"
+            path = "/api/1.0/orders/historical"
             timestamp, signature = self._sign_request(method, path)
 
             headers = {
@@ -73,7 +77,8 @@ class TradeSyncService:
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data.get("data", []) if isinstance(data, dict) else data
-                    return items
+                    # Filter for filled orders only
+                    return [item for item in items if str(item.get("status", "")).lower() == "filled"]
                 else:
                     logger.debug(f"Revolut X fills fetch returned HTTP {resp.status_code}")
                     return []

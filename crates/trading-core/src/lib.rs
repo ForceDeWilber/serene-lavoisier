@@ -90,6 +90,7 @@ mod tests {
                 enabled: false, // test static baseline spacing
                 ..Default::default()
             },
+            mode: None,
         };
         let mut strategy = GeometricGridStrategy::new(config);
         let center = dec!(50000.0);
@@ -119,6 +120,7 @@ mod tests {
             order_size_gbp: dec!(50.0),
             rebalance_threshold_pct: dec!(0.015),
             dynamic_pricing: DynamicPricingConfig::default(),
+            mode: None,
         };
         let mut strategy = GeometricGridStrategy::new(config);
         strategy.inventory_base = dec!(3.0); // positive inventory (long 3 BTC)

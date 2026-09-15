@@ -126,7 +126,12 @@ function Start-Components {
     $pidsToSave = @{}
     if (Test-Path $PidFile) {
         try {
-            $pidsToSave = Get-Content $PidFile -Raw | ConvertFrom-Json
+            $existing = Get-Content $PidFile -Raw | ConvertFrom-Json
+            if ($existing) {
+                foreach ($prop in $existing.PSObject.Properties) {
+                    $pidsToSave[$prop.Name] = $prop.Value
+                }
+            }
         } catch {}
     }
 
@@ -145,7 +150,7 @@ function Start-Components {
         }
 
         $engineLog = Join-Path $LogsDir "engine.log"
-        "" > $engineLog
+        try { Clear-Content $engineLog -ErrorAction SilentlyContinue } catch {}
         $engineProc = Start-Process -FilePath $engineExe `
             -WorkingDirectory $ProjectRoot `
             -RedirectStandardOutput $engineLog `
@@ -159,7 +164,7 @@ function Start-Components {
     # 2. Python FastAPI Backend
     if ($Target -in @("all", "backend")) {
         $backendLog = Join-Path $LogsDir "backend.log"
-        "" > $backendLog
+        try { Clear-Content $backendLog -ErrorAction SilentlyContinue } catch {}
         $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
         if (-not $pythonExe) {
             $pythonExe = "python"
@@ -179,7 +184,7 @@ function Start-Components {
     # 3. Next.js Frontend
     if ($Target -in @("all", "frontend")) {
         $frontendLog = Join-Path $LogsDir "frontend.log"
-        "" > $frontendLog
+        try { Clear-Content $frontendLog -ErrorAction SilentlyContinue } catch {}
         $frontendDir = Join-Path $ProjectRoot "frontend"
 
         $frontendProc = Start-Process -FilePath "cmd.exe" `

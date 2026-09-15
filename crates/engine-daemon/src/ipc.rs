@@ -306,13 +306,20 @@ impl IpcServer {
                     }
                     IpcRequest::AddPair { config } => {
                         let sym = config.symbol.as_slash();
+                        info!("[IPC-COMMAND] AddPair received for {}", sym);
                         match manager.spawn_pair(config).await {
-                            Ok(()) => IpcResponse::Ack {
-                                message: format!("Pair {} dynamically spawned and registered", sym),
-                            },
-                            Err(e) => IpcResponse::Error {
-                                error: format!("Failed to spawn pair {}: {}", sym, e),
-                            },
+                            Ok(()) => {
+                                info!("[IPC-COMMAND] Pair {} successfully spawned and registered", sym);
+                                IpcResponse::Ack {
+                                    message: format!("Pair {} dynamically spawned and registered", sym),
+                                }
+                            }
+                            Err(e) => {
+                                error!("[IPC-ERROR] Failed to spawn pair {}: {}", sym, e);
+                                IpcResponse::Error {
+                                    error: format!("Failed to spawn pair {}: {}", sym, e),
+                                }
+                            }
                         }
                     }
                     IpcRequest::ListPairs => {
@@ -328,6 +335,10 @@ impl IpcServer {
                         dynamic_pricing_enabled,
                         inventory_gamma,
                     } => {
+                        info!(
+                            "[IPC-COMMAND] TuneRunner received for {} (paused: {:?}, step_pct: {:?}, rebalance_pct: {:?}, order_size: {:?})",
+                            runner_id, paused, step_pct, rebalance_threshold_pct, order_size_fiat
+                        );
                         if manager
                             .tune_runner(
                                 &runner_id,
@@ -340,10 +351,12 @@ impl IpcServer {
                             )
                             .await
                         {
+                            info!("[IPC-COMMAND] Successfully tuned runner {}", runner_id);
                             IpcResponse::Ack {
                                 message: format!("Tuned runner {}", runner_id),
                             }
                         } else {
+                            warn!("[IPC-ERROR] Runner {} not found in active pairs", runner_id);
                             IpcResponse::Error {
                                 error: format!("Runner {} not found in active pairs", runner_id),
                             }
@@ -355,67 +368,92 @@ impl IpcServer {
                         impulse_threshold_pct,
                         order_size_gbp,
                     } => {
+                        info!(
+                            "[IPC-COMMAND] TuneSniper received for {} (enabled: {:?}, impulse_threshold: {:?}, order_size: {:?})",
+                            runner_id, enabled, impulse_threshold_pct, order_size_gbp
+                        );
                         if manager.tune_sniper(&runner_id, enabled, impulse_threshold_pct, order_size_gbp).await {
+                            info!("[IPC-COMMAND] Successfully tuned sniper {}", runner_id);
                             IpcResponse::Ack {
                                 message: format!("Tuned sniper {}", runner_id),
                             }
                         } else {
+                            warn!("[IPC-ERROR] Sniper {} not found in active pairs", runner_id);
                             IpcResponse::Error {
                                 error: format!("Sniper {} not found in active pairs", runner_id),
                             }
                         }
                     }
                     IpcRequest::ToggleSniper { runner_id, enabled } => {
+                        info!("[IPC-COMMAND] ToggleSniper received for {} (target: {:?})", runner_id, enabled);
                         if let Some(state) = manager.toggle_sniper(&runner_id, enabled).await {
+                            info!("[IPC-COMMAND] Sniper {} enabled set to {}", runner_id, state);
                             IpcResponse::Ack {
                                 message: format!("Sniper {} enabled={}", runner_id, state),
                             }
                         } else {
+                            warn!("[IPC-ERROR] Sniper {} not found in active pairs", runner_id);
                             IpcResponse::Error {
                                 error: format!("Sniper {} not found in active pairs", runner_id),
                             }
                         }
                     }
                     IpcRequest::EmergencyKillSwitch { reason } => {
-                        warn!("EMERGENCY KILL SWITCH TRIGGERED: {}", reason);
+                        warn!("[IPC-COMMAND] [RISK-TRIGGER] EMERGENCY KILL SWITCH TRIGGERED: {}", reason);
                         manager.emergency_kill_switch().await;
+                        info!("[IPC-COMMAND] Emergency kill switch completed. All open orders canceled.");
                         IpcResponse::Ack {
                             message: format!("Emergency kill switch executed: {}", reason),
                         }
                     }
                     IpcRequest::ResetCircuitBreaker => {
+                        info!("[IPC-COMMAND] [RISK-RESET] Manual circuit breaker reset request received");
                         manager.reset_circuit_breaker().await;
+                        info!("[IPC-COMMAND] [RISK-RESET] Circuit breaker reset and all pair runners resumed");
                         IpcResponse::Ack {
                             message: "Circuit breaker reset. All pair runners resumed.".into(),
                         }
                     }
                     IpcRequest::SetRunnerMode { runner_id, mode } => {
+                        info!("[IPC-COMMAND] SetRunnerMode received for {} -> {}", runner_id, mode);
                         if manager.set_runner_mode(&runner_id, &mode).await {
+                            info!("[IPC-COMMAND] Runner {} mode set to {}", runner_id, mode);
                             IpcResponse::Ack {
                                 message: format!("Runner {} mode set to {}", runner_id, mode),
                             }
                         } else {
+                            warn!("[IPC-ERROR] Runner {} not found for mode change", runner_id);
                             IpcResponse::Error {
                                 error: format!("Runner {} not found", runner_id),
                             }
                         }
                     }
                     IpcRequest::LiquidatePair { runner_id } => {
+                        warn!("[IPC-COMMAND] LiquidatePair received for {}", runner_id);
                         match manager.liquidate_pair(&runner_id).await {
-                            Ok(_) => IpcResponse::Ack {
-                                message: format!("Runner {} liquidated successfully", runner_id),
-                            },
-                            Err(e) => IpcResponse::Error {
-                                error: format!("Failed to liquidate runner {}: {}", runner_id, e),
+                            Ok(_) => {
+                                info!("[IPC-COMMAND] Runner {} liquidated successfully", runner_id);
+                                IpcResponse::Ack {
+                                    message: format!("Runner {} liquidated successfully", runner_id),
+                                }
+                            }
+                            Err(e) => {
+                                error!("[IPC-ERROR] Failed to liquidate runner {}: {}", runner_id, e);
+                                IpcResponse::Error {
+                                    error: format!("Failed to liquidate runner {}: {}", runner_id, e),
+                                }
                             }
                         }
                     }
                     IpcRequest::RemovePair { runner_id } => {
+                        warn!("[IPC-COMMAND] RemovePair received for {}", runner_id);
                         if manager.remove_pair(&runner_id).await {
+                            info!("[IPC-COMMAND] Runner {} removed successfully", runner_id);
                             IpcResponse::Ack {
                                 message: format!("Runner {} removed successfully", runner_id),
                             }
                         } else {
+                            warn!("[IPC-ERROR] Runner {} not found for removal", runner_id);
                             IpcResponse::Error {
                                 error: format!("Runner {} not found for removal", runner_id),
                             }

@@ -113,12 +113,12 @@ impl LiveRevolutClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let err_text = resp.text().await.unwrap_or_default();
-            error!("Revolut X order submission failed [{status}]: {err_text}");
+            error!("[ORDER-REJECT] Revolut X rejected order [{status}]: {err_text}");
             return Err(format!("Revolut X rejected order [{status}]: {err_text}"));
         }
 
         info!(
-            "[LIVE-ORDER-PLACED] {} {} {} @ £{} ({})",
+            "[ORDER-DISPATCH] [VENUE-ACK] Revolut X placed order: {} {} {} @ £{} ({})",
             order.side, order.qty, order.symbol, order.price, order.client_order_id
         );
         Ok(order.clone())
@@ -157,10 +157,11 @@ impl ExecutionClient for LiveRevolutClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let err_text = resp.text().await.unwrap_or_default();
+            error!("[ORDER-CANCEL-FAIL] Revolut X cancel failed [{status}] for {}: {err_text}", client_order_id);
             return Err(format!("Revolut X cancel failed [{status}]: {err_text}"));
         }
 
-        info!("[LIVE-CANCEL] Canceled order on Revolut X: {}", client_order_id);
+        info!("[ORDER-CANCEL] [VENUE-ACK] Canceled order on Revolut X: {}", client_order_id);
         Ok(())
     }
 
@@ -186,10 +187,11 @@ impl ExecutionClient for LiveRevolutClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let err_text = resp.text().await.unwrap_or_default();
+            error!("[ORDER-CANCEL-FAIL] Revolut X bulk cancel failed [{status}]: {err_text}");
             return Err(format!("Revolut X bulk cancel failed [{status}]: {err_text}"));
         }
 
-        info!("[LIVE-BULK-CANCEL] All active orders canceled on Revolut X");
+        info!("[ORDER-CANCEL] [VENUE-ACK] All active orders canceled on Revolut X");
         Ok(1)
     }
 

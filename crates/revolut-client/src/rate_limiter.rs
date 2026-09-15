@@ -47,6 +47,10 @@ impl TokenBucketRateLimiter {
             // Calculate required wait time for next token
             let deficit = 1.0 - state.tokens;
             let wait_secs = deficit / state.refill_rate_per_sec;
+            tracing::warn!(
+                "[RATE-LIMIT] Revolut X token bucket depleted (tokens: {:.2}/{:.0}). Throttling request for {:.1}ms",
+                state.tokens, state.capacity, wait_secs * 1000.0
+            );
             drop(state);
 
             tokio::time::sleep(Duration::from_secs_f64(wait_secs)).await;

@@ -154,31 +154,36 @@ impl GridRunner {
                             }
 
                             for fill in fills_to_process {
-                                info!("[{}] Order {} FILLED on live venue", self.runner_id, fill.client_order_id);
+                                info!("[ORDER-FILL] [{}] Live venue fill confirmed: Order {} ({} {} @ £{})", self.runner_id, fill.client_order_id, fill.side, fill.qty, fill.price);
                                 self.risk_engine.settle_fill(&fill).await;
                                 if let Some(ref db) = self.db {
                                     db.update_order_status(&fill.client_order_id, "FILLED").await;
                                 }
                                 if let Some(counter_order) = self.strategy.on_fill(&fill) {
+                                    info!(
+                                        "[COUNTER-ORDER] [{}] Generated counter order {} for fill {}: {} {} @ £{}",
+                                        self.runner_id, counter_order.client_order_id, fill.client_order_id, counter_order.side, counter_order.qty, counter_order.price
+                                    );
                                     match self.risk_engine.validate_order(&counter_order).await {
                                         Ok(()) => {
                                             match self.submit_and_save(&counter_order).await {
                                                 Ok(submitted) => {
+                                                    info!("[ORDER-DISPATCH] [{}] Counter order placed: {} {} @ £{} ({})", self.runner_id, submitted.side, submitted.qty, submitted.price, submitted.client_order_id);
                                                     self.strategy.register_active_order(submitted);
                                                 }
                                                 Err(e) => {
-                                                    error!("[{}] Live submission of counter order failed: {}", self.runner_id, e);
+                                                    error!("[ORDER-REJECT] [{}] Live submission of counter order failed: {}", self.runner_id, e);
                                                     self.risk_engine.release_order_capital(&counter_order).await;
                                                 }
                                             }
                                         }
                                         Err(RiskError::CircuitBreakerTripped(reason)) => {
-                                            error!("[{}] Risk rejection: {}", self.runner_id, reason);
+                                            error!("[RISK-TRIGGER] [{}] Counter order rejected by risk engine: {}", self.runner_id, reason);
                                             let _ = self.execution_client.cancel_all_orders().await;
                                             self.is_paused = true;
                                         }
                                         Err(err) => {
-                                            warn!("[{}] Counter order risk check failed: {}", self.runner_id, err);
+                                            warn!("[RISK-REJECT] [{}] Counter order risk check failed: {}", self.runner_id, err);
                                         }
                                     }
                                 }
@@ -206,17 +211,19 @@ impl GridRunner {
                     // 2. Adverse selection check on Kraken tick
                     let is_toxic_dump = self.risk_engine.record_kraken_tick(&self.symbol, mid_price, tick.timestamp).await;
                     if is_toxic_dump {
-                        warn!(
-                            "[{}] Adverse selection lag filter triggered! Canceling resting BUY bids on Revolut X",
-                            self.runner_id
-                        );
                         let buys_to_cancel: Vec<Order> = self.strategy.active_orders.values()
                             .filter(|o| o.side == OrderSide::Buy)
                             .cloned()
                             .collect();
 
+                        warn!(
+                            "[RISK-TRIGGER] [{}] Adverse selection lag filter triggered! Canceling {} resting BUY bids on Revolut X",
+                            self.runner_id, buys_to_cancel.len()
+                        );
+
                         for ord in buys_to_cancel {
                             let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
+                            info!("[ORDER-CANCEL] [{}] Canceled resting BUY order {} due to adverse selection plunge", self.runner_id, ord.client_order_id);
                             if let Some(ref db) = self.db {
                                 db.update_order_status(&ord.client_order_id, "CANCELED").await;
                             }
@@ -229,23 +236,29 @@ impl GridRunner {
                     if let Some(ref sim) = self.simulator {
                         let fills = sim.process_tick(&tick).await;
                         for fill in fills {
+                            info!("[ORDER-FILL] [{}] Simulator fill: Order {} ({} {} @ £{})", self.runner_id, fill.client_order_id, fill.side, fill.qty, fill.price);
                             self.risk_engine.settle_fill(&fill).await;
                             if let Some(counter_order) = self.strategy.on_fill(&fill) {
+                                info!(
+                                    "[COUNTER-ORDER] [{}] Generated simulator counter order {} for fill {}: {} {} @ £{}",
+                                    self.runner_id, counter_order.client_order_id, fill.client_order_id, counter_order.side, counter_order.qty, counter_order.price
+                                );
                                 match self.risk_engine.validate_order(&counter_order).await {
                                     Ok(()) => {
                                         if let Ok(submitted) = self.submit_and_save(&counter_order).await {
+                                            info!("[ORDER-DISPATCH] [{}] Simulator counter order placed: {} {} @ £{} ({})", self.runner_id, submitted.side, submitted.qty, submitted.price, submitted.client_order_id);
                                             self.strategy.register_active_order(submitted);
                                         } else {
                                             self.risk_engine.release_order_capital(&counter_order).await;
                                         }
                                     }
                                     Err(RiskError::CircuitBreakerTripped(reason)) => {
-                                        error!("[{}] Risk rejection: {}", self.runner_id, reason);
+                                        error!("[RISK-TRIGGER] [{}] Counter order rejected by risk engine: {}", self.runner_id, reason);
                                         let _ = self.execution_client.cancel_all_orders().await;
                                         self.is_paused = true;
                                     }
                                     Err(err) => {
-                                        warn!("[{}] Counter order risk check failed: {}", self.runner_id, err);
+                                        warn!("[RISK-REJECT] [{}] Counter order risk check failed: {}", self.runner_id, err);
                                     }
                                 }
                             }
@@ -258,18 +271,23 @@ impl GridRunner {
                         let free_fiat = balances.as_ref().and_then(|b| b.get(&self.symbol.quote).copied());
                         let available_base = balances.as_ref().and_then(|b| b.get(&self.symbol.base).copied());
 
+                        info!(
+                            "[ORDER-INTENT] [{}] Initializing grid: mid=£{:.2}, {} rungs/side (quote balance: {:?}, base balance: {:?})",
+                            self.runner_id, mid_price, self.strategy.config.rungs_per_side, free_fiat, available_base
+                        );
                         let initial_orders = self.strategy.initialize_grid(mid_price, free_fiat, available_base);
                         for order in initial_orders {
                             match self.risk_engine.validate_order(&order).await {
                                 Ok(()) => {
                                     if let Ok(submitted) = self.submit_and_save(&order).await {
+                                        info!("[ORDER-DISPATCH] [{}] Placed initial grid rung: {} {} @ £{} ({})", self.runner_id, submitted.side, submitted.qty, submitted.price, submitted.client_order_id);
                                         self.strategy.register_active_order(submitted);
                                     } else {
                                         self.risk_engine.release_order_capital(&order).await;
                                     }
                                 }
                                 Err(err) => {
-                                    warn!("[{}] Initial grid order rejected by risk engine: {}", self.runner_id, err);
+                                    warn!("[RISK-REJECT] [{}] Initial grid order rejected by risk engine: {}", self.runner_id, err);
                                 }
                             }
                         }
@@ -278,12 +296,13 @@ impl GridRunner {
                     // 5. Check for rebalancing if price drifted significantly
                     if self.strategy.needs_rebalance(mid_price) {
                         info!(
-                            "[{}] Price drifted significantly from center ({:.2} -> {:.2}). Rebalancing grid.",
-                            self.runner_id, self.strategy.center_price.unwrap_or_default(), mid_price
+                            "[ORDER-INTENT] [{}] Price drifted significantly from center ({:.2} -> {:.2}). Rebalancing grid (clearing {} orders)",
+                            self.runner_id, self.strategy.center_price.unwrap_or_default(), mid_price, self.strategy.active_orders.len()
                         );
                         // Cancel existing orders
                         for (_, ord) in self.strategy.active_orders.drain() {
                             let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
+                            info!("[ORDER-CANCEL] [{}] Canceled resting order {} for grid rebalance", self.runner_id, ord.client_order_id);
                             if let Some(ref db) = self.db {
                                 db.update_order_status(&ord.client_order_id, "CANCELED").await;
                             }
@@ -296,11 +315,17 @@ impl GridRunner {
 
                         let new_orders = self.strategy.initialize_grid(mid_price, free_fiat, available_base);
                         for order in new_orders {
-                            if self.risk_engine.validate_order(&order).await.is_ok() {
-                                if let Ok(submitted) = self.submit_and_save(&order).await {
-                                    self.strategy.register_active_order(submitted);
-                                } else {
-                                    self.risk_engine.release_order_capital(&order).await;
+                            match self.risk_engine.validate_order(&order).await {
+                                Ok(()) => {
+                                    if let Ok(submitted) = self.submit_and_save(&order).await {
+                                        info!("[ORDER-DISPATCH] [{}] Placed rebalance grid rung: {} {} @ £{} ({})", self.runner_id, submitted.side, submitted.qty, submitted.price, submitted.client_order_id);
+                                        self.strategy.register_active_order(submitted);
+                                    } else {
+                                        self.risk_engine.release_order_capital(&order).await;
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!("[RISK-REJECT] [{}] Rebalance grid order rejected by risk engine: {}", self.runner_id, err);
                                 }
                             }
                         }
@@ -315,27 +340,27 @@ impl GridRunner {
                     if let Some(step) = update.step_pct {
                         self.strategy.config.step_pct = step;
                         self.strategy.dynamic_pricing.config.base_step_pct = step;
-                        info!("[{}] Dynamically updated step_pct to {:.4}%", self.runner_id, step);
+                        info!("[RUNNER-TUNE] [{}] Dynamically updated step_pct to {:.4}%", self.runner_id, step);
                     }
                     if let Some(rebal) = update.rebalance_threshold_pct {
                         self.strategy.config.rebalance_threshold_pct = rebal;
-                        info!("[{}] Dynamically updated rebalance_threshold_pct to {:.4}%", self.runner_id, rebal);
+                        info!("[RUNNER-TUNE] [{}] Dynamically updated rebalance_threshold_pct to {:.4}%", self.runner_id, rebal);
                     }
                     if let Some(size) = update.order_size_fiat {
                         self.strategy.config.order_size_gbp = size;
-                        info!("[{}] Dynamically updated order_size_fiat to £{}", self.runner_id, size);
+                        info!("[RUNNER-TUNE] [{}] Dynamically updated order_size_fiat to £{}", self.runner_id, size);
                     }
                     if let Some(dyn_enabled) = update.dynamic_pricing_enabled {
                         self.strategy.dynamic_pricing.config.enabled = dyn_enabled;
-                        info!("[{}] Dynamically set dynamic_pricing enabled={}", self.runner_id, dyn_enabled);
+                        info!("[RUNNER-TUNE] [{}] Dynamically set dynamic_pricing enabled={}", self.runner_id, dyn_enabled);
                     }
                     if let Some(gamma) = update.inventory_gamma {
                         self.strategy.dynamic_pricing.config.inventory_gamma = gamma;
-                        info!("[{}] Dynamically updated inventory_gamma to {:.4}", self.runner_id, gamma);
+                        info!("[RUNNER-TUNE] [{}] Dynamically updated inventory_gamma to {:.4}", self.runner_id, gamma);
                     }
                     if let Some(mode) = update.mode {
                         self.strategy.config.mode = Some(mode.clone());
-                        info!("[{}] Dynamically updated mode to {}", self.runner_id, mode);
+                        info!("[RUNNER-TUNE] [{}] Dynamically updated mode to {}", self.runner_id, mode);
                     }
                 }
             }
@@ -360,9 +385,14 @@ impl GridRunner {
 
     async fn submit_and_save(&self, order: &Order) -> Result<Order, String> {
         let res = self.execution_client.submit_post_only_order(order).await;
-        if res.is_ok() {
-            if let Some(ref db) = self.db {
-                db.save_order(order, "OPEN").await;
+        match &res {
+            Ok(_) => {
+                if let Some(ref db) = self.db {
+                    db.save_order(order, "OPEN").await;
+                }
+            }
+            Err(e) => {
+                error!("[ORDER-REJECT] [{}] Order submission failed for {}: {}", self.runner_id, order.client_order_id, e);
             }
         }
         res

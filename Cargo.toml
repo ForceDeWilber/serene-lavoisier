@@ -29,6 +29,7 @@ base64 = "0.22"
 hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+tracing-appender = "0.2"
 thiserror = "2.0"
 anyhow = "1.0"
 async-trait = "0.1"

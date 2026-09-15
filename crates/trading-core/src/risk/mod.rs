@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tracing::{error, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Error, Debug)]
 pub enum RiskError {
@@ -68,7 +68,7 @@ impl AdverseSelectionLagFilter {
                 let drop_pct = (peak - price) / peak;
                 if drop_pct >= self.max_drop_threshold_pct {
                     warn!(
-                        "Adverse selection trigger: price dropped {:.3}% (peak: {}, current: {}) within {}s",
+                        "[RISK-TRIGGER] Adverse selection triggered: price dropped {:.3}% (peak: {}, current: {}) within {}s",
                         drop_pct * dec!(100),
                         peak,
                         price,
@@ -107,13 +107,14 @@ impl CircuitBreaker {
 
     pub fn trip(&self, reason: &str) {
         self.tripped.store(true, Ordering::SeqCst);
-        error!("CRITICAL: Global circuit breaker tripped! Reason: {}", reason);
+        error!("[RISK-TRIGGER] CRITICAL: Global circuit breaker TRIPPED! Reason: {}", reason);
     }
 
     pub fn reset(&mut self, initial_equity: Decimal) {
         self.peak_equity = initial_equity;
         self.tripped.store(false, Ordering::SeqCst);
         self.last_reset = Utc::now();
+        info!("[RISK-RESET] Global circuit breaker manually RESET. Baseline peak equity set to £{}", initial_equity);
     }
 
     pub fn update_equity(&mut self, current_equity: Decimal, now: DateTime<Utc>) -> bool {
@@ -203,6 +204,7 @@ impl CentralRiskEngine {
         // 1. Check Circuit Breaker
         let cb = self.circuit_breaker.lock().await;
         if cb.is_tripped() {
+            warn!("[RISK-REJECT] Order {} rejected: Global circuit breaker is active", order.client_order_id);
             return Err(RiskError::CircuitBreakerTripped(
                 "Global circuit breaker is active. All order placement is halted.".into(),
             ));
@@ -217,13 +219,23 @@ impl CentralRiskEngine {
 
                 let mut envelopes = self.envelopes.lock().await;
                 let key = format!("{}:{}", order.runner_id, required_currency);
-                let envelope = envelopes.get_mut(&key).ok_or_else(|| RiskError::EnvelopeExhausted {
-                    currency: required_currency.clone(),
-                    required: required_amount,
-                    available: Decimal::ZERO,
+                let envelope = envelopes.get_mut(&key).ok_or_else(|| {
+                    warn!(
+                        "[RISK-REJECT] Order {} rejected: No capital envelope found for {}:{}",
+                        order.client_order_id, order.runner_id, required_currency
+                    );
+                    RiskError::EnvelopeExhausted {
+                        currency: required_currency.clone(),
+                        required: required_amount,
+                        available: Decimal::ZERO,
+                    }
                 })?;
 
                 if envelope.available < required_amount {
+                    warn!(
+                        "[RISK-REJECT] Order {} rejected: Envelope exhausted for {}. Required: {} {}, Available: {} {}",
+                        order.client_order_id, order.runner_id, required_amount, required_currency, envelope.available, required_currency
+                    );
                     return Err(RiskError::EnvelopeExhausted {
                         currency: required_currency.clone(),
                         required: required_amount,
@@ -237,6 +249,10 @@ impl CentralRiskEngine {
                     required: required_amount,
                     available: envelope.available,
                 })?;
+                debug!(
+                    "[RISK-LOCK] Locked {} {} in envelope {} for order {}",
+                    required_amount, required_currency, key, order.client_order_id
+                );
             }
             OrderSide::Sell => {
                 // Spot Sell Orders: Liquidates base crypto inventory back into quote fiat.
@@ -247,6 +263,10 @@ impl CentralRiskEngine {
                 let key = format!("{}:{}", order.runner_id, required_currency);
                 if let Some(envelope) = envelopes.get_mut(&key) {
                     if envelope.available < order.qty {
+                        warn!(
+                            "[RISK-REJECT] Spot sell order {} rejected: Base envelope exhausted for {}. Required: {} {}, Available: {} {}",
+                            order.client_order_id, order.runner_id, order.qty, required_currency, envelope.available, required_currency
+                        );
                         return Err(RiskError::EnvelopeExhausted {
                             currency: required_currency.clone(),
                             required: order.qty,
@@ -258,10 +278,15 @@ impl CentralRiskEngine {
                         required: order.qty,
                         available: envelope.available,
                     })?;
+                    debug!(
+                        "[RISK-LOCK] Locked {} {} in envelope {} for order {}",
+                        order.qty, required_currency, key, order.client_order_id
+                    );
                 }
             }
         }
 
+        debug!("[RISK-CHECK] Order {} passed risk validation", order.client_order_id);
         Ok(())
     }
 
@@ -279,6 +304,10 @@ impl CentralRiskEngine {
         let key = format!("{}:{}", order.runner_id, currency);
         if let Some(env) = envelopes.get_mut(&key) {
             env.unlock(amount);
+            debug!(
+                "[RISK-RELEASE] Released {} {} back to envelope {} for order {}",
+                amount, currency, key, order.client_order_id
+            );
         }
     }
 

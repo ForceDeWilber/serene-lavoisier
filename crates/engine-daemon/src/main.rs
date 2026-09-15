@@ -18,10 +18,28 @@ use trading_core::simulator::PaperExecutionSimulator;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Initialize logging
+    // 1. Initialize logging: Dual-layer (Terminal Stdout + Non-blocking Rolling File Appender)
+    let logs_dir = std::path::Path::new("logs");
+    if !logs_dir.exists() {
+        let _ = std::fs::create_dir_all(logs_dir);
+    }
+    let file_appender = tracing_appender::rolling::daily("logs", "engine.log");
+    let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info,kraken_client=info,trading_core=info,revolut_client=info,engine_daemon=info".into());
+
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(true);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking_file)
+        .with_ansi(false);
+
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,kraken_client=info,trading_core=info,revolut_client=info".into()))
-        .with(tracing_subscriber::fmt::layer())
+        .with(env_filter)
+        .with(stdout_layer)
+        .with(file_layer)
         .init();
 
     dotenv().ok();
@@ -156,12 +174,12 @@ async fn main() -> anyhow::Result<()> {
     );
     ipc_server.run().await?;
 
-    // 9. Background Heartbeat Logger
+    // 9. Background Heartbeat Logger (throttled to 60s to maintain clean paper trail)
     let client_heartbeat = execution_client.clone();
     let risk_heartbeat = risk_engine.clone();
     let mode_str = trading_mode.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
             let bals = client_heartbeat.get_balances().await.unwrap_or_default();
@@ -169,12 +187,13 @@ async fn main() -> anyhow::Result<()> {
             let cb_tripped = risk_heartbeat.is_circuit_breaker_tripped().await;
 
             info!(
-                "[{}-HEARTBEAT] Balances: [GBP: £{:.2}, USD: ${:.2}, BTC: {:.6}, ETH: {:.6}] | Active Orders: {} | Circuit Breaker: {}",
+                "[HEARTBEAT] Mode: {} | Balances: [GBP: £{:.2}, USD: ${:.2}, BTC: {:.6}, ETH: {:.6}, SOL: {:.4}] | Active Orders: {} | Circuit Breaker: {}",
                 mode_str,
                 bals.get("GBP").unwrap_or(&dec!(0.0)),
                 bals.get("USD").unwrap_or(&dec!(0.0)),
                 bals.get("BTC").unwrap_or(&dec!(0.0)),
                 bals.get("ETH").unwrap_or(&dec!(0.0)),
+                bals.get("SOL").unwrap_or(&dec!(0.0)),
                 resting.len(),
                 if cb_tripped { "TRIPPED" } else { "NORMAL" }
             );

@@ -3,7 +3,7 @@ use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
-use tracing::info;
+use tracing::{error, info, warn};
 
 use crate::ipc::{RunnerTelemetryDto, SniperTelemetryDto};
 use trading_core::db::DbStore;
@@ -270,8 +270,10 @@ impl RunnerManager {
             if let Some(ref db) = self.db_store {
                 let _ = db.delete_pair_config(&sym).await;
             }
+            info!("[MANAGER] Runner {} ({}) cleanly unmapped and deregistered", runner_id, sym);
             true
         } else {
+            warn!("[MANAGER] Runner {} not found for removal in pairs map", runner_id);
             false
         }
     }
@@ -290,14 +292,17 @@ impl RunnerManager {
                     let base = handle.config.symbol.base.clone();
                     if let Some(qty) = bals.get(&base) {
                         if *qty > dec!(0.0) {
-                            // Market sell
                             let order = trading_core::model::Order::new_market(
                                 &handle.grid_runner_id,
                                 handle.config.symbol.clone(),
                                 trading_core::model::OrderSide::Sell,
                                 *qty,
                             );
-                            let _ = self.execution_client.submit_taker_order(&order).await;
+                            info!("[LIQUIDATE-DISPATCH] [{}] Submitting market liquidation sell for {} {}", handle.grid_runner_id, qty, handle.config.symbol);
+                            match self.execution_client.submit_taker_order(&order).await {
+                                Ok(filled) => info!("[LIQUIDATE-FILLED] [{}] Market liquidated: {} {} @ £{}", handle.grid_runner_id, filled.qty, handle.config.symbol, filled.price),
+                                Err(e) => error!("[LIQUIDATE-FAILED] [{}] Market liquidation failed: {}", handle.grid_runner_id, e),
+                            }
                         }
                     }
                 }
