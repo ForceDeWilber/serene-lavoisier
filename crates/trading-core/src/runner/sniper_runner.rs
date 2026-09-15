@@ -92,7 +92,7 @@ impl SniperRunner {
 
         // Background poller to avoid hitting REST on every WebSocket tick (Bug 6)
         let _poller = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(2000));
             loop {
                 interval.tick().await;
                 let bbo = client_poll.get_bbo(&sym_poll).await.ok();

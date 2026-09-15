@@ -11,6 +11,9 @@ use signer::Ed25519Signer;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::RwLock;
+use tokio::time::Instant;
 use tracing::{error, info};
 use trading_core::execution::ExecutionClient;
 use trading_core::model::{Order, OrderSide, OrderStatus, OrderType, Symbol};
@@ -44,6 +47,8 @@ pub struct LiveRevolutClient {
     client: Client,
     signer: Ed25519Signer,
     rate_limiter: TokenBucketRateLimiter,
+    cached_balances: RwLock<Option<(Instant, HashMap<String, Decimal>)>>,
+    cached_active_orders: RwLock<Option<(Instant, Vec<Order>)>>,
 }
 
 impl LiveRevolutClient {
@@ -66,6 +71,8 @@ impl LiveRevolutClient {
             client,
             signer,
             rate_limiter,
+            cached_balances: RwLock::new(None),
+            cached_active_orders: RwLock::new(None),
         })
     }
 
@@ -117,6 +124,10 @@ impl LiveRevolutClient {
             return Err(format!("Revolut X rejected order [{status}]: {err_text}"));
         }
 
+        // Invalidate cached balances and active orders immediately
+        *self.cached_balances.write().await = None;
+        *self.cached_active_orders.write().await = None;
+
         info!(
             "[ORDER-DISPATCH] [VENUE-ACK] Revolut X placed order: {} {} {} @ £{} ({})",
             order.side, order.qty, order.symbol, order.price, order.client_order_id
@@ -161,6 +172,10 @@ impl ExecutionClient for LiveRevolutClient {
             return Err(format!("Revolut X cancel failed [{status}]: {err_text}"));
         }
 
+        // Invalidate cached active orders and balances immediately
+        *self.cached_active_orders.write().await = None;
+        *self.cached_balances.write().await = None;
+
         info!("[ORDER-CANCEL] [VENUE-ACK] Canceled order on Revolut X: {}", client_order_id);
         Ok(())
     }
@@ -191,6 +206,10 @@ impl ExecutionClient for LiveRevolutClient {
             return Err(format!("Revolut X bulk cancel failed [{status}]: {err_text}"));
         }
 
+        // Invalidate cached active orders and balances immediately
+        *self.cached_active_orders.write().await = None;
+        *self.cached_balances.write().await = None;
+
         info!("[ORDER-CANCEL] [VENUE-ACK] All active orders canceled on Revolut X");
         Ok(1)
     }
@@ -201,6 +220,15 @@ impl ExecutionClient for LiveRevolutClient {
     }
 
     async fn get_balances(&self) -> Result<HashMap<String, Decimal>, String> {
+        {
+            let cache = self.cached_balances.read().await;
+            if let Some((cached_at, ref map)) = *cache {
+                if cached_at.elapsed() < Duration::from_millis(1500) {
+                    return Ok(map.clone());
+                }
+            }
+        }
+
         self.rate_limiter.acquire().await;
 
         let timestamp = Utc::now().timestamp_millis();
@@ -240,10 +268,20 @@ impl ExecutionClient for LiveRevolutClient {
             }
         }
 
+        *self.cached_balances.write().await = Some((Instant::now(), map.clone()));
         Ok(map)
     }
 
     async fn get_active_orders(&self) -> Result<Vec<Order>, String> {
+        {
+            let cache = self.cached_active_orders.read().await;
+            if let Some((cached_at, ref orders)) = *cache {
+                if cached_at.elapsed() < Duration::from_millis(1500) {
+                    return Ok(orders.clone());
+                }
+            }
+        }
+
         self.rate_limiter.acquire().await;
 
         let timestamp = Utc::now().timestamp_millis();
@@ -338,6 +376,7 @@ impl ExecutionClient for LiveRevolutClient {
             orders.push(ord);
         }
 
+        *self.cached_active_orders.write().await = Some((Instant::now(), orders.clone()));
         Ok(orders)
     }
 

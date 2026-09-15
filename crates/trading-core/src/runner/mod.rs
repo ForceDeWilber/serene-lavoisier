@@ -268,8 +268,8 @@ impl GridRunner {
                     // 4. Initialize grid if not yet initialized
                     if self.strategy.center_price.is_none() && mid_price > Decimal::ZERO {
                         let balances = self.execution_client.get_balances().await.ok();
-                        let free_fiat = balances.as_ref().and_then(|b| b.get(&self.symbol.quote).copied());
-                        let available_base = balances.as_ref().and_then(|b| b.get(&self.symbol.base).copied());
+                        let free_fiat = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO));
+                        let available_base = balances.as_ref().map(|b| b.get(&self.symbol.base).copied().unwrap_or(Decimal::ZERO));
 
                         info!(
                             "[ORDER-INTENT] [{}] Initializing grid: mid=£{:.2}, {} rungs/side (quote balance: {:?}, base balance: {:?})",
@@ -310,8 +310,8 @@ impl GridRunner {
                         }
                         // Re-initialize grid with live balances
                         let balances = self.execution_client.get_balances().await.ok();
-                        let free_fiat = balances.as_ref().and_then(|b| b.get(&self.symbol.quote).copied());
-                        let available_base = balances.as_ref().and_then(|b| b.get(&self.symbol.base).copied());
+                        let free_fiat = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO));
+                        let available_base = balances.as_ref().map(|b| b.get(&self.symbol.base).copied().unwrap_or(Decimal::ZERO));
 
                         let new_orders = self.strategy.initialize_grid(mid_price, free_fiat, available_base);
                         for order in new_orders {
