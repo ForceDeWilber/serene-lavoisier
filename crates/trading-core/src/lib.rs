@@ -1,3 +1,4 @@
+pub mod brain;
 pub mod db;
 pub mod execution;
 pub mod model;

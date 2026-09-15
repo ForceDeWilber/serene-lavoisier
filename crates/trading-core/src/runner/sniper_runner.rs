@@ -4,7 +4,7 @@ use crate::risk::CentralRiskEngine;
 use crate::strategy::{LeadLagSniperStrategy, SniperConfig};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
 
@@ -27,6 +27,18 @@ pub struct SniperTelemetry {
     pub total_sniper_profit_gbp: Decimal,
     pub total_fees_paid_gbp: Decimal,
     pub average_lead_ms: u64,
+    pub revolut_best_bid: Option<Decimal>,
+    pub revolut_best_ask: Option<Decimal>,
+    pub current_dislocation_pct: Option<Decimal>,
+    pub kraken_price: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CachedMarketState {
+    pub bbo: Option<(Decimal, Decimal)>,
+    pub free_quote: Decimal,
+    pub kraken_price: Option<Decimal>,
+    pub current_dislocation_pct: Option<Decimal>,
 }
 
 pub struct SniperRunner {
@@ -39,6 +51,8 @@ pub struct SniperRunner {
     tuning_rx: watch::Receiver<SniperTuningUpdate>,
     in_flight: bool,
     telemetry_tx: Option<watch::Sender<SniperTelemetry>>,
+    cached_state: Arc<RwLock<CachedMarketState>>,
+    brain: Option<Arc<crate::brain::EngineBrain>>,
 }
 
 impl SniperRunner {
@@ -61,7 +75,14 @@ impl SniperRunner {
             tuning_rx,
             in_flight: false,
             telemetry_tx: None,
+            cached_state: Arc::new(RwLock::new(CachedMarketState::default())),
+            brain: None,
         }
+    }
+
+    pub fn with_brain(mut self, brain: Arc<crate::brain::EngineBrain>) -> Self {
+        self.brain = Some(brain);
+        self
     }
 
     pub fn with_telemetry_channel(mut self, tx: watch::Sender<SniperTelemetry>) -> Self {
@@ -79,27 +100,55 @@ impl SniperRunner {
         info!("[{}] Lead-Lag Momentum Sniper Runner active for {}", self.runner_id, self.symbol);
         self.publish_telemetry();
 
-        #[derive(Debug, Clone, Default)]
-        struct CachedMarketState {
-            bbo: Option<(Decimal, Decimal)>,
-            free_quote: Decimal,
-        }
-
-        let cached_state = Arc::new(tokio::sync::RwLock::new(CachedMarketState::default()));
-        let cached_clone = cached_state.clone();
+        let cached_clone = self.cached_state.clone();
         let client_poll = self.execution_client.clone();
         let sym_poll = self.symbol.clone();
+        let telem_tx_clone = self.telemetry_tx.clone();
+        let brain_clone = self.brain.clone();
 
-        // Background poller to avoid hitting REST on every WebSocket tick (Bug 6)
+        // Background poller to refresh Revolut BBO every 2.5s without hammering Revolut API
         let _poller = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(2000));
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(2500));
             loop {
                 interval.tick().await;
                 let bbo = client_poll.get_bbo(&sym_poll).await.ok();
-                let free_quote = client_poll.get_balance(&sym_poll.quote).await.unwrap_or(Decimal::ZERO);
-                let mut state = cached_clone.write().await;
-                state.bbo = bbo;
-                state.free_quote = free_quote;
+                let raw_quote = client_poll.get_balance(&sym_poll.quote).await.unwrap_or(Decimal::ZERO);
+                let free_quote = if let Some(ref b) = brain_clone {
+                    b.get_sniper_allocation(raw_quote, &[sym_poll.clone()])
+                } else {
+                    raw_quote
+                };
+                let mut updated = false;
+                if let Ok(mut state) = cached_clone.write() {
+                    state.bbo = bbo;
+                    state.free_quote = free_quote;
+                    if let (Some((_, ask)), Some(k_mid)) = (bbo, state.kraken_price) {
+                        if ask > Decimal::ZERO {
+                            state.current_dislocation_pct = Some(((k_mid - ask) / ask * dec!(100.0)).round_dp(4));
+                        }
+                    }
+                    updated = true;
+                }
+                if updated {
+                    if let Some(ref tx) = telem_tx_clone {
+                        let (bid, ask, k_price, disloc) = if let Ok(state) = cached_clone.read() {
+                            (
+                                state.bbo.map(|b| b.0),
+                                state.bbo.map(|b| b.1),
+                                state.kraken_price,
+                                state.current_dislocation_pct,
+                            )
+                        } else {
+                            (None, None, None, None)
+                        };
+                        let _ = tx.send_modify(|curr| {
+                            curr.revolut_best_bid = bid;
+                            curr.revolut_best_ask = ask;
+                            curr.current_dislocation_pct = disloc;
+                            curr.kraken_price = k_price;
+                        });
+                    }
+                }
             }
         });
 
@@ -117,12 +166,26 @@ impl SniperRunner {
 
                     let kraken_mid = tick.mid_price();
 
+                    // Update cached kraken price and recalculate dislocation immediately
+                    if let Ok(mut state) = self.cached_state.write() {
+                        state.kraken_price = Some(kraken_mid);
+                        if let Some((_, ask)) = state.bbo {
+                            if ask > Decimal::ZERO {
+                                state.current_dislocation_pct = Some(((kraken_mid - ask) / ask * dec!(100.0)).round_dp(4));
+                            }
+                        }
+                    }
+                    self.publish_telemetry();
+
                     // Read cached Revolut X BBO and free balance
                     let (rev_bid, rev_ask, free_quote) = {
-                        let state = cached_state.read().await;
-                        match state.bbo {
-                            Some((bid, ask)) => (bid, ask, state.free_quote),
-                            None => continue,
+                        if let Ok(state) = self.cached_state.read() {
+                            match state.bbo {
+                                Some((bid, ask)) => (bid, ask, state.free_quote),
+                                None => continue,
+                            }
+                        } else {
+                            continue;
                         }
                     };
 
@@ -246,6 +309,17 @@ impl SniperRunner {
     }
 
     pub fn get_telemetry(&self) -> SniperTelemetry {
+        let (bid, ask, k_price, disloc) = if let Ok(state) = self.cached_state.read() {
+            (
+                state.bbo.map(|b| b.0),
+                state.bbo.map(|b| b.1),
+                state.kraken_price,
+                state.current_dislocation_pct,
+            )
+        } else {
+            (None, None, None, None)
+        };
+
         SniperTelemetry {
             runner_id: self.runner_id.clone(),
             symbol: self.symbol.clone(),
@@ -257,6 +331,10 @@ impl SniperRunner {
             total_sniper_profit_gbp: self.strategy.total_sniper_profit_gbp,
             total_fees_paid_gbp: self.strategy.total_taker_fees_paid_gbp,
             average_lead_ms: self.strategy.average_lead_advantage_ms,
+            revolut_best_bid: bid,
+            revolut_best_ask: ask,
+            current_dislocation_pct: disloc,
+            kraken_price: k_price,
         }
     }
 }

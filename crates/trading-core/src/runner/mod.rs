@@ -49,6 +49,7 @@ pub struct GridRunner {
     is_paused: bool,
     db: Option<Arc<crate::db::DbStore>>,
     telemetry_tx: Option<watch::Sender<RunnerTelemetry>>,
+    brain: Option<Arc<crate::brain::EngineBrain>>,
 }
 
 impl GridRunner {
@@ -75,7 +76,13 @@ impl GridRunner {
             is_paused: false,
             db,
             telemetry_tx: None,
+            brain: None,
         }
+    }
+
+    pub fn with_brain(mut self, brain: Arc<crate::brain::EngineBrain>) -> Self {
+        self.brain = Some(brain);
+        self
     }
 
     pub fn with_telemetry_channel(mut self, tx: watch::Sender<RunnerTelemetry>) -> Self {
@@ -268,11 +275,23 @@ impl GridRunner {
                     // 4. Initialize grid if not yet initialized
                     if self.strategy.center_price.is_none() && mid_price > Decimal::ZERO {
                         let balances = self.execution_client.get_balances().await.ok();
-                        let free_fiat = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO));
+                        let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
+                        let free_fiat = if let Some(ref brain) = self.brain {
+                            let (sniper_res, _, allocations) = brain.partition_capital(total_quote, &[self.symbol.clone()]);
+                            let pair_budget = allocations.get(&self.symbol.as_slash()).copied().unwrap_or(Decimal::ZERO);
+                            info!(
+                                "[BRAIN-PARTITION] [{}] Cash £{:.2} partitioned: £{:.2} to Sniper reserve, £{:.2} to {}",
+                                self.runner_id, total_quote, sniper_res, pair_budget, self.symbol
+                            );
+                            self.risk_engine.register_envelope(&self.runner_id, &self.symbol.quote, pair_budget).await;
+                            Some(pair_budget)
+                        } else {
+                            balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO))
+                        };
                         let available_base = balances.as_ref().map(|b| b.get(&self.symbol.base).copied().unwrap_or(Decimal::ZERO));
 
                         info!(
-                            "[ORDER-INTENT] [{}] Initializing grid: mid=£{:.2}, {} rungs/side (quote balance: {:?}, base balance: {:?})",
+                            "[ORDER-INTENT] [{}] Initializing grid: mid=£{:.2}, {} rungs/side (allocated budget: {:?}, base balance: {:?})",
                             self.runner_id, mid_price, self.strategy.config.rungs_per_side, free_fiat, available_base
                         );
                         let initial_orders = self.strategy.initialize_grid(mid_price, free_fiat, available_base);
@@ -310,7 +329,15 @@ impl GridRunner {
                         }
                         // Re-initialize grid with live balances
                         let balances = self.execution_client.get_balances().await.ok();
-                        let free_fiat = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO));
+                        let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
+                        let free_fiat = if let Some(ref brain) = self.brain {
+                            let (_, _, allocations) = brain.partition_capital(total_quote, &[self.symbol.clone()]);
+                            let pair_budget = allocations.get(&self.symbol.as_slash()).copied().unwrap_or(Decimal::ZERO);
+                            self.risk_engine.register_envelope(&self.runner_id, &self.symbol.quote, pair_budget).await;
+                            Some(pair_budget)
+                        } else {
+                            balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO))
+                        };
                         let available_base = balances.as_ref().map(|b| b.get(&self.symbol.base).copied().unwrap_or(Decimal::ZERO));
 
                         let new_orders = self.strategy.initialize_grid(mid_price, free_fiat, available_base);

@@ -43,6 +43,14 @@ pub struct SniperTelemetryDto {
     pub total_sniper_profit_gbp: Decimal,
     pub total_fees_paid_gbp: Decimal,
     pub average_lead_ms: u64,
+    #[serde(default)]
+    pub revolut_best_bid: Option<Decimal>,
+    #[serde(default)]
+    pub revolut_best_ask: Option<Decimal>,
+    #[serde(default)]
+    pub current_dislocation_pct: Option<Decimal>,
+    #[serde(default)]
+    pub kraken_price: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +127,7 @@ pub enum IpcResponse {
         snipers: Vec<SniperTelemetryDto>,
         resting_orders_count: usize,
         active_orders: Vec<OrderTelemetryDto>,
+        brain: Option<trading_core::brain::BrainTelemetryDto>,
     },
     PairsList {
         pairs: Vec<PairConfig>,
@@ -293,6 +302,11 @@ impl IpcServer {
                             })
                             .collect();
 
+                        let cash_gbp = balances.get("GBP").copied().unwrap_or(Decimal::ZERO);
+                        let all_pair_configs = manager.get_all_pairs().await;
+                        let active_pairs: Vec<trading_core::model::Symbol> = all_pair_configs.into_iter().map(|p| p.symbol).collect();
+                        let brain_telem = manager.brain.get_telemetry(cash_gbp, &active_pairs);
+
                         IpcResponse::Telemetry {
                             trading_mode: mode.clone(),
                             circuit_breaker_tripped: cb_tripped,
@@ -302,6 +316,7 @@ impl IpcServer {
                             snipers,
                             resting_orders_count: active_dtos.len(),
                             active_orders: active_dtos,
+                            brain: Some(brain_telem),
                         }
                     }
                     IpcRequest::AddPair { config } => {

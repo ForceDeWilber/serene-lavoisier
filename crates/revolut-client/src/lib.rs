@@ -49,6 +49,7 @@ pub struct LiveRevolutClient {
     rate_limiter: TokenBucketRateLimiter,
     cached_balances: RwLock<Option<(Instant, HashMap<String, Decimal>)>>,
     cached_active_orders: RwLock<Option<(Instant, Vec<Order>)>>,
+    cached_bbo: RwLock<HashMap<String, (Instant, (Decimal, Decimal))>>,
 }
 
 impl LiveRevolutClient {
@@ -58,7 +59,16 @@ impl LiveRevolutClient {
         private_key_source: &str,
     ) -> Result<Self, String> {
         let signer = Ed25519Signer::from_file_or_hex(api_key, private_key_source).map_err(|e| e.to_string())?;
+
+        let mut default_headers = header::HeaderMap::new();
+        default_headers.insert(header::ACCEPT, header::HeaderValue::from_static("application/json"));
+        default_headers.insert(
+            header::USER_AGENT,
+            header::HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"),
+        );
+
         let client = Client::builder()
+            .default_headers(default_headers)
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .tcp_nodelay(true)
             .build()
@@ -73,6 +83,7 @@ impl LiveRevolutClient {
             rate_limiter,
             cached_balances: RwLock::new(None),
             cached_active_orders: RwLock::new(None),
+            cached_bbo: RwLock::new(HashMap::new()),
         })
     }
 
@@ -403,11 +414,21 @@ impl ExecutionClient for LiveRevolutClient {
 
     async fn get_bbo(&self, symbol: &Symbol) -> Result<(Decimal, Decimal), String> {
         let pair = symbol.as_dash();
+        {
+            let cache = self.cached_bbo.read().await;
+            if let Some((cached_at, bbo)) = cache.get(&pair) {
+                if cached_at.elapsed() < Duration::from_millis(1500) {
+                    return Ok(*bbo);
+                }
+            }
+        }
+
         let url = format!("{}/api/2.0/public/order-book/{}", self.base_url.trim_end_matches('/'), pair);
 
         let resp = self
             .client
             .get(&url)
+            .header(header::ACCEPT, "application/json")
             .timeout(std::time::Duration::from_millis(3000))
             .send()
             .await
@@ -450,7 +471,9 @@ impl ExecutionClient for LiveRevolutClient {
             .and_then(|l| Decimal::from_str(&l.price).ok())
             .ok_or_else(|| "Empty asks in Revolut X order book".to_string())?;
 
-        Ok((best_bid, best_ask))
+        let bbo = (best_bid, best_ask);
+        self.cached_bbo.write().await.insert(pair, (Instant::now(), bbo));
+        Ok(bbo)
     }
 }
 

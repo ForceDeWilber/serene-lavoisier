@@ -33,6 +33,7 @@ pub struct RunnerManager {
     db_store: Option<Arc<DbStore>>,
     kraken_sub_tx: mpsc::UnboundedSender<Vec<Symbol>>,
     tick_broadcast: broadcast::Sender<MarketTick>,
+    pub brain: Arc<trading_core::brain::EngineBrain>,
     pairs: Arc<RwLock<HashMap<String, PairHandle>>>, // key: symbol.as_slash() e.g. "BTC/USD"
 }
 
@@ -52,6 +53,7 @@ impl RunnerManager {
             db_store,
             kraken_sub_tx,
             tick_broadcast,
+            brain: Arc::new(trading_core::brain::EngineBrain::default()),
             pairs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -133,11 +135,16 @@ impl RunnerManager {
             successful_snipes: 0,
             total_sniper_profit_gbp: Decimal::ZERO,
             total_fees_paid_gbp: Decimal::ZERO,
-            average_lead_ms: 450,
+            average_lead_ms: 0,
+            revolut_best_bid: None,
+            revolut_best_ask: None,
+            current_dislocation_pct: None,
+            kraken_price: None,
         });
 
         let initial_orders = self.execution_client.get_active_orders().await.unwrap_or_default();
         let grid_runner = grid_runner
+            .with_brain(self.brain.clone())
             .with_initial_active_orders(initial_orders)
             .with_telemetry_channel(grid_telem_tx);
 
@@ -158,7 +165,9 @@ impl RunnerManager {
             self.risk_engine.clone(),
             self.tick_broadcast.subscribe(),
             sniper_tune_rx,
-        ).with_telemetry_channel(sniper_telem_tx);
+        )
+        .with_brain(self.brain.clone())
+        .with_telemetry_channel(sniper_telem_tx);
 
         // 6. Spawn independent Tokio tasks
         tokio::spawn(async move {
@@ -425,6 +434,10 @@ impl RunnerManager {
                 total_sniper_profit_gbp: sniper_snap.total_sniper_profit_gbp,
                 total_fees_paid_gbp: sniper_snap.total_fees_paid_gbp,
                 average_lead_ms: sniper_snap.average_lead_ms,
+                revolut_best_bid: sniper_snap.revolut_best_bid,
+                revolut_best_ask: sniper_snap.revolut_best_ask,
+                current_dislocation_pct: sniper_snap.current_dislocation_pct,
+                kraken_price: sniper_snap.kraken_price,
             });
         }
 
