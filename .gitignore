@@ -8,6 +8,7 @@ trading*.db-wal
 trading*.db-shm
 *.log
 /tmp/trading_engine.sock
+*.sock
 .DS_Store
 node_modules/
 .next/
