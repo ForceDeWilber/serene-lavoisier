@@ -79,6 +79,7 @@ interface LiveTradeEvent {
   fx_rate?: number;
   profit?: number;
   pnl_gbp?: number;
+  pnl_pct?: number;
   strategy?: string;
   note?: string;
 }
@@ -134,6 +135,7 @@ interface SniperTelemetry {
 interface CapitalManagement {
   balance_source: string;
   starting_balance_gbp: number;
+  total_deposited_cash_gbp?: number;
   settled_cash_gbp: number;
   cumulative_profit_gbp: number;
   profit_lock_pct: number;
@@ -145,6 +147,8 @@ interface CapitalManagement {
   split_btc_pct: number;
   split_eth_pct: number;
   split_sol_pct?: number;
+  unrealized_pnl_gbp?: number;
+  crypto_holdings_value_gbp?: number;
   allocations: {
     trading_power_gbp: number;
     expansion_ratio: number;
@@ -220,10 +224,13 @@ interface TelemetryPayload {
   balances: Record<string, number>;
   portfolio?: {
     total_equity_gbp: number;
+    total_deposited_cash_gbp?: number;
     initial_budget_gbp: number;
     total_pnl_gbp: number;
     total_pnl_pct: number;
     total_realized_pnl_gbp: number;
+    unrealized_pnl_gbp?: number;
+    crypto_holdings_value_gbp?: number;
     total_fee_savings_gbp: number;
   };
   capital_management?: CapitalManagement;
@@ -529,6 +536,55 @@ export default function ProductionDashboard() {
   const solBalance = telemetry?.balances?.SOL ?? 0;
 
   const totalEquity = portfolio?.total_equity_gbp ?? gbpBalance;
+  const depositedCash = portfolio?.total_deposited_cash_gbp ?? capMgmt?.total_deposited_cash_gbp ?? portfolio?.initial_budget_gbp ?? (telemetry?.is_live ? 25.00 : 1000.00);
+  const netPnLGbp = portfolio?.total_pnl_gbp ?? (totalEquity - depositedCash);
+  const netPnLPct = portfolio?.total_pnl_pct ?? (depositedCash > 0 ? (netPnLGbp / depositedCash) * 100 : 0);
+  const realizedPnLGbp = portfolio?.total_realized_pnl_gbp ?? capMgmt?.cumulative_profit_gbp ?? 0.0;
+  const unrealizedPnLGbp = portfolio?.unrealized_pnl_gbp ?? (netPnLGbp - realizedPnLGbp);
+
+  const [depositModalOpen, setDepositModalOpen] = useState<boolean>(false);
+  const [depositedCashInput, setDepositedCashInput] = useState<string>("25.00");
+  const [updatingDeposit, setUpdatingDeposit] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (depositedCash > 0) {
+      setDepositedCashInput(depositedCash.toFixed(2));
+    }
+  }, [depositedCash]);
+
+  const handleUpdateDepositedCash = async (amount: number) => {
+    if (isNaN(amount) || amount <= 0) return;
+    setUpdatingDeposit(true);
+    try {
+      const res = await fetch("/api/proxy/capital/deposited-cash?mode=live", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deposited_cash_gbp: amount }),
+      });
+      if (res.ok) {
+        setStatusMessage(`Total deposited cash updated to £${amount.toFixed(2)}`);
+        setDepositModalOpen(false);
+        fetchTelemetry();
+      } else {
+        setStatusMessage("Failed to update deposited cash basis");
+      }
+    } catch {
+      setStatusMessage("Network error updating deposited cash");
+    } finally {
+      setUpdatingDeposit(false);
+    }
+  };
+
+  const formatPnL = (pnl: number | undefined | null, showSign: boolean = true): string => {
+    if (pnl === undefined || pnl === null || isNaN(pnl)) return "—";
+    if (pnl === 0) return "£0.00";
+    const absVal = Math.abs(pnl);
+    const sign = pnl > 0 ? (showSign ? "+" : "") : "-";
+    if (absVal < 0.01) {
+      return `${sign}£${absVal.toFixed(4)}`;
+    }
+    return `${sign}£${absVal.toFixed(2)}`;
+  };
   
   // Dynamically extract distinct assets from active runners or market prices
   const trackedPairs = React.useMemo(() => {
@@ -769,52 +825,61 @@ export default function ProductionDashboard() {
           {/* Total Account Equity */}
           <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
             <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
-              Total Account Valuation
+              Total Valuation
             </span>
             <div className="text-xl font-mono font-bold text-[#f0f6fc] mt-1.5">
               £{totalEquity.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
-            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5">
-              Cash + Crypto Holdings
+            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 truncate">
+              Cash £{gbpBalance.toFixed(2)} + Crypto £{Math.max(0, totalEquity - gbpBalance).toFixed(2)}
             </div>
           </div>
 
-          {/* Settled GBP Cash */}
+          {/* Total Deposited Cash (Cost Basis) */}
           <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
-            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
-              Available Cash (GBP)
-            </span>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
+                Total Cash Put In
+              </span>
+              <button
+                onClick={() => setDepositModalOpen(true)}
+                className="text-[10px] text-[#58a6ff] hover:underline font-mono px-1 py-0.5 rounded bg-[#21262d] border border-[#30363d]"
+                title="Edit your total deposited cash / cost basis"
+              >
+                Edit
+              </button>
+            </div>
             <div className="text-xl font-mono font-bold text-[#58a6ff] mt-1.5">
-              £{gbpBalance.toFixed(2)}
+              £{depositedCash.toFixed(2)}
             </div>
-            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5">
-              Settled balance
-            </div>
-          </div>
-
-          {/* Net PnL */}
-          <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
-            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
-              Net PnL
-            </span>
-            <div className={`text-xl font-mono font-bold mt-1.5 ${(telemetry?.portfolio?.total_pnl_gbp ?? 0) >= 0 ? "text-emerald-400" : "text-[#f85149]"}`}>
-              {(telemetry?.portfolio?.total_pnl_gbp ?? 0) >= 0 ? "+" : ""}£{Math.abs(telemetry?.portfolio?.total_pnl_gbp ?? 0).toFixed(2)}
-            </div>
-            <div className={`text-[11px] font-mono mt-0.5 ${(telemetry?.portfolio?.total_pnl_pct ?? 0) >= 0 ? "text-emerald-400/80" : "text-[#f85149]/80"}`}>
-              {(telemetry?.portfolio?.total_pnl_pct ?? 0) >= 0 ? "+" : ""}{(telemetry?.portfolio?.total_pnl_pct ?? 0).toFixed(2)}% Return
+            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 truncate">
+              Cost Basis / Inflows
             </div>
           </div>
 
-          {/* Realized PnL */}
+          {/* Net PnL vs Total Inflows */}
           <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
             <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
-              Realized PnL
+              Net Account PnL
             </span>
-            <div className={`text-xl font-mono font-bold mt-1.5 ${(telemetry?.portfolio?.total_realized_pnl_gbp ?? 0) >= 0 ? "text-emerald-400" : "text-[#f85149]"}`}>
-              {(telemetry?.portfolio?.total_realized_pnl_gbp ?? 0) >= 0 ? "+" : ""}£{Math.abs(telemetry?.portfolio?.total_realized_pnl_gbp ?? 0).toFixed(2)}
+            <div className={`text-xl font-mono font-bold mt-1.5 ${netPnLGbp >= 0 ? "text-emerald-400" : "text-[#f85149]"}`}>
+              {formatPnL(netPnLGbp)}
             </div>
-            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5">
-              Locked profit
+            <div className={`text-[11px] font-mono mt-0.5 ${netPnLPct >= 0 ? "text-emerald-400/80" : "text-[#f85149]/80"}`}>
+              {netPnLPct >= 0 ? "+" : ""}{netPnLPct.toFixed(2)}% vs Inflows
+            </div>
+          </div>
+
+          {/* Realized Closed Trade Profits & Unrealized Drift */}
+          <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex flex-col justify-between">
+            <span className="text-[10px] text-[#8b949e] uppercase font-semibold tracking-wider">
+              Realized Trade Profit
+            </span>
+            <div className="text-xl font-mono font-bold mt-1.5 text-emerald-400">
+              {formatPnL(realizedPnLGbp)}
+            </div>
+            <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 truncate">
+              Drift: <span className={unrealizedPnLGbp >= 0 ? "text-emerald-400" : "text-[#f85149]"}>{formatPnL(unrealizedPnLGbp)}</span>
             </div>
           </div>
         </div>
@@ -950,7 +1015,7 @@ export default function ProductionDashboard() {
       </section>
 
       {/* 5. LEAD-LAG DISLOCATION STRATEGY & CALIBRATED GAUGES */}
-      <section className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-3">
+      <section className={`bg-[#161b22] border border-[#30363d] rounded-xl p-4 shadow-sm space-y-3 ${mobileTab === "dashboard" ? "block" : "hidden md:block"}`}>
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-[#30363d]/60 pb-3">
           <div>
             <div className="flex items-center gap-2">
@@ -1231,7 +1296,76 @@ export default function ProductionDashboard() {
           </div>
         </div>
 
-        <div className="overflow-x-auto">
+        {/* Mobile Card List View (Touch-friendly for small screens) */}
+        <div className="block md:hidden space-y-2.5">
+          {filteredTrades.length === 0 ? (
+            <div className="py-8 text-center text-[#8b949e] text-xs font-sans border border-[#30363d]/30 rounded-lg">
+              No executed trades recorded yet. Awaiting fills on Revolut X.
+            </div>
+          ) : (
+            filteredTrades.map((t) => {
+              const isBuy = (t.side || t.action || "").toUpperCase().includes("BUY");
+              const price = typeof t.price === "number" ? t.price : parseFloat(String(t.price)) || 0;
+              const qty = typeof t.qty === "number" ? t.qty : parseFloat(String(t.qty)) || 0;
+              const val = t.value_gbp ?? (price * qty);
+              const pnl = t.pnl_gbp ?? t.profit ?? 0.0;
+              const timeStr = String(t.time_str || t.timestamp || "12:00:00");
+              const strat = t.strategy || (t.action?.includes("SNIPE") ? "Lead-Lag" : "Maker Grid");
+              const pnlPct = t.pnl_pct ?? (val > 0 && pnl !== 0 ? (pnl / val) * 100 : null);
+
+              return (
+                <div key={t.id} className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 space-y-2 font-mono text-xs">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        isBuy ? "text-emerald-400 bg-emerald-500/10 border border-emerald-500/20" : "text-[#f85149] bg-[#f85149]/10 border border-[#f85149]/20"
+                      }`}>
+                        {isBuy ? "BUY" : "SELL"}
+                      </span>
+                      <span className="font-bold text-sm text-[#f0f6fc]">{t.symbol}</span>
+                      <span className="text-[10px] text-[#8b949e] bg-[#161b22] px-1.5 py-0.5 rounded border border-[#30363d]">
+                        {strat}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-[#8b949e]">{timeStr}</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-[11px] pt-2 border-t border-[#30363d]/40">
+                    <div>
+                      <span className="text-[#8b949e]">Exec Price: </span>
+                      <span className="text-[#f0f6fc] font-semibold">
+                        £{price.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[#8b949e]">Cost / Val: </span>
+                      <span className="text-[#f0f6fc] font-semibold">£{val.toFixed(2)}</span>
+                    </div>
+                    <div>
+                      <span className="text-[#8b949e]">Quantity: </span>
+                      <span className="text-[#8b949e]">{qty}</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[#8b949e]">Net PnL: </span>
+                      {isBuy ? (
+                        <span className="text-[#58a6ff] text-[10px] font-semibold bg-[#58a6ff]/10 px-1.5 py-0.5 rounded">
+                          BUY · OPEN
+                        </span>
+                      ) : (
+                        <span className={`font-bold ${pnl > 0 ? "text-emerald-400" : pnl < 0 ? "text-[#f85149]" : "text-[#8b949e]"}`}>
+                          {formatPnL(pnl)} {pnlPct !== null && <span className="text-[10px] font-normal font-sans">({pnlPct > 0 ? "+" : ""}{pnlPct.toFixed(2)}%)</span>}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Desktop 10-Column Financial Table */}
+        <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-left font-mono text-xs">
             <thead className="text-[10px] text-[#8b949e] border-b border-[#30363d]/60 bg-[#161b22]">
               <tr>
@@ -1265,6 +1399,7 @@ export default function ProductionDashboard() {
                   const fx_rate = t.fx_rate ?? 1.0;
                   const timeStr = String(t.time_str || t.timestamp || "12:00:00");
                   const strat = t.strategy || (t.action?.includes("SNIPE") ? "Lead-Lag Dislocation" : "Maker Grid");
+                  const pnlPct = t.pnl_pct ?? (val > 0 && pnl !== 0 ? (pnl / val) * 100 : null);
 
                   return (
                     <tr key={t.id} className="hover:bg-[#21262d]/40 transition">
@@ -1290,8 +1425,16 @@ export default function ProductionDashboard() {
                       <td className="py-2 text-right text-[#8b949e]">
                         £{fee.toFixed(3)}
                       </td>
-                      <td className={`py-2 text-right font-medium ${pnl > 0 ? "text-emerald-400" : pnl < 0 ? "text-[#f85149]" : "text-[#8b949e]"}`}>
-                        {pnl > 0 ? `+£${pnl.toFixed(2)}` : pnl < 0 ? `-£${Math.abs(pnl).toFixed(2)}` : "—"}
+                      <td className={`py-2 text-right font-medium`}>
+                        {isBuy ? (
+                          <span className="text-[#58a6ff] text-[10px] font-medium bg-[#58a6ff]/10 px-1.5 py-0.2 rounded">
+                            BUY · OPEN
+                          </span>
+                        ) : (
+                          <span className={`${pnl > 0 ? "text-emerald-400" : pnl < 0 ? "text-[#f85149]" : "text-[#8b949e]"}`}>
+                            {formatPnL(pnl)} {pnlPct !== null && <span className="text-[10px] font-normal text-[#8b949e]">({pnlPct > 0 ? "+" : ""}{pnlPct.toFixed(2)}%)</span>}
+                          </span>
+                        )}
                       </td>
                       <td className="py-2 text-right text-[#8b949e] text-[10px]">
                         {strat}
@@ -1679,6 +1822,83 @@ export default function ProductionDashboard() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* 11. Edit Deposited Cash (Cost Basis) Modal */}
+      {depositModalOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-[#161b22] border border-[#30363d] rounded-xl max-w-sm w-full p-5 space-y-4 shadow-xl font-mono text-xs">
+            <div className="flex items-center justify-between border-b border-[#30363d] pb-2.5">
+              <div className="flex items-center gap-2">
+                <Wallet className="w-4 h-4 text-[#58a6ff]" />
+                <h3 className="text-sm font-semibold text-[#f0f6fc]">Set Total Deposited Cash</h3>
+              </div>
+              <button
+                onClick={() => setDepositModalOpen(false)}
+                className="text-[#8b949e] hover:text-[#f0f6fc]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-[11px] text-[#8b949e]">
+              Enter the exact total GBP cash you have deposited into your Revolut X account. The terminal uses this cost basis to accurately compute your true Net PnL vs Inflows.
+            </p>
+
+            <div className="space-y-2">
+              <label className="text-[10px] text-[#8b949e] block uppercase tracking-wider">Total Cash Deposited (£ GBP)</label>
+              <div className="relative">
+                <span className="absolute left-3 top-2 text-[#8b949e] font-bold">£</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="1"
+                  value={depositedCashInput}
+                  onChange={(e) => setDepositedCashInput(e.target.value)}
+                  placeholder="e.g. 25.00"
+                  className="w-full bg-[#0d1117] border border-[#30363d] pl-7 pr-3 py-1.5 rounded text-lg font-bold text-[#f0f6fc] focus:border-[#58a6ff] outline-none"
+                />
+              </div>
+
+              {/* Quick Presets */}
+              <div className="flex gap-1.5 pt-1">
+                {[10, 25, 50, 100, 250].map((amt) => (
+                  <button
+                    key={amt}
+                    type="button"
+                    onClick={() => setDepositedCashInput(amt.toFixed(2))}
+                    className={`flex-1 py-1 rounded text-[10px] border transition ${
+                      parseFloat(depositedCashInput) === amt
+                        ? "bg-[#21262d] text-[#f0f6fc] border-[#58a6ff]"
+                        : "bg-[#0d1117] text-[#8b949e] border-[#30363d] hover:text-[#c9d1d9]"
+                    }`}
+                  >
+                    £{amt}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#30363d]/50">
+              <button
+                type="button"
+                onClick={() => setDepositModalOpen(false)}
+                className="px-3 py-1.5 rounded-lg text-[#8b949e] hover:text-[#f0f6fc] transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={updatingDeposit}
+                onClick={() => handleUpdateDepositedCash(parseFloat(depositedCashInput) || 25.00)}
+                className="px-3 py-1.5 rounded-lg bg-[#58a6ff] hover:bg-blue-500 text-white font-medium transition flex items-center gap-1.5"
+              >
+                {updatingDeposit && <RefreshCw className="w-3 h-3 animate-spin" />}
+                <span>Save Cost Basis</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

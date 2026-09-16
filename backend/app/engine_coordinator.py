@@ -227,6 +227,10 @@ class TradingEngineCoordinator:
                         )
                         records = result.scalars().all()
                         for r in records:
+                            pnl_val = float(r.realized_pnl_gbp) if r.realized_pnl_gbp is not None else 0.0
+                            val_gbp = float(r.value_gbp) if r.value_gbp is not None else (float(r.price or 0.0) * float(r.qty or 0.0))
+                            pnl_pct = round((pnl_val / val_gbp) * 100.0, 2) if val_gbp > 0 and pnl_val != 0.0 else 0.0
+
                             live_trades.append({
                                 "id": r.id,
                                 "timestamp": r.execution_time.strftime("%H:%M:%S") if r.execution_time else "",
@@ -234,9 +238,10 @@ class TradingEngineCoordinator:
                                 "side": r.side,
                                 "price": r.price,
                                 "qty": r.qty,
-                                "value_gbp": r.value_gbp,
+                                "value_gbp": val_gbp,
                                 "fee_gbp": r.fee_gbp,
-                                "pnl_gbp": r.realized_pnl_gbp,
+                                "pnl_gbp": pnl_val,
+                                "pnl_pct": pnl_pct,
                                 "fx_rate": r.fx_rate_to_gbp,
                                 "strategy": r.strategy_type,
                             })
@@ -256,12 +261,13 @@ class TradingEngineCoordinator:
                 in_memory_realized = runners_realized + snipers_realized
                 total_realized_pnl = round(max(total_realized_pnl_db, in_memory_realized), 4)
 
-                # Baseline starting capital
-                initial_budget = capital_manager.starting_balance_gbp if is_live else 1000.0
+                # Total deposited cash basis (cost basis)
+                total_deposited = capital_manager.total_deposited_cash_gbp if is_live else 1000.0
                 
-                # Net PnL = Total Equity - Initial Budget
-                total_pnl_gbp = round(total_equity - initial_budget, 2)
-                total_pnl_pct = round((total_pnl_gbp / initial_budget) * 100.0, 2) if initial_budget > 0 else 0.0
+                # Net PnL = Total Equity - Total Deposited Cash
+                total_pnl_gbp = round(total_equity - total_deposited, 2)
+                total_pnl_pct = round((total_pnl_gbp / total_deposited) * 100.0, 2) if total_deposited > 0 else 0.0
+                unrealized_pnl_gbp = round(total_pnl_gbp - total_realized_pnl, 4)
 
                 # Update capital manager cumulative & locked profits
                 capital_manager.cumulative_profit_gbp = total_realized_pnl
@@ -293,16 +299,20 @@ class TradingEngineCoordinator:
                     "balances": bals,
                     "portfolio": {
                         "total_equity_gbp": total_equity,
-                        "initial_budget_gbp": initial_budget,
+                        "total_deposited_cash_gbp": total_deposited,
+                        "initial_budget_gbp": total_deposited,
                         "total_pnl_gbp": total_pnl_gbp,
                         "total_pnl_pct": total_pnl_pct,
                         "total_realized_pnl_gbp": total_realized_pnl,
+                        "unrealized_pnl_gbp": unrealized_pnl_gbp,
+                        "crypto_holdings_value_gbp": round(crypto_total, 2),
                         "total_fee_savings_gbp": 0.0,
                     },
                     "capital_management": {
                         "mode": "LIVE" if is_live else "PAPER",
                         "balance_source": "Revolut X Live HTTP/2 API" if is_live else "Virtual Paper Simulator",
-                        "starting_balance_gbp": initial_budget,
+                        "total_deposited_cash_gbp": total_deposited,
+                        "starting_balance_gbp": total_deposited,
                         "settled_cash_gbp": gbp,
                         "available_trading_power_gbp": gbp,
                         "reinvested_capital_gbp": round(total_equity - gbp, 2),
@@ -320,6 +330,8 @@ class TradingEngineCoordinator:
                         "total_equity_gbp": total_equity,
                         "compounded_pnl_gbp": total_pnl_gbp,
                         "compounded_return_pct": total_pnl_pct,
+                        "unrealized_pnl_gbp": unrealized_pnl_gbp,
+                        "crypto_holdings_value_gbp": round(crypto_total, 2),
                         "max_rolling_drawdown_pct": 0.0,
                         "circuit_breaker_tripped": payload.get("circuit_breaker_tripped", False),
                         "circuit_breaker_reason": payload.get("circuit_breaker_reason", "Normal"),

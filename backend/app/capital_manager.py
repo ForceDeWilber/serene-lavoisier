@@ -15,9 +15,10 @@ class CapitalManager:
     Manages account balance auto-detection, dynamic capital split allocation,
     compounded trading power, and high-water mark dynamic profit locking.
     """
-    def __init__(self, starting_balance_gbp: float = 10.00):
+    def __init__(self, starting_balance_gbp: float = 25.00):
         self.balance_source: str = "PAPER_WALLET"
         self.starting_balance_gbp: float = starting_balance_gbp
+        self.total_deposited_cash_gbp: float = starting_balance_gbp
         self.settled_cash_gbp: float = starting_balance_gbp
         self.crypto_balances: Dict[str, float] = {
             "BTC": 0.0,
@@ -51,8 +52,12 @@ class CapitalManager:
             if STATE_FILE.exists():
                 with open(STATE_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    if "starting_balance_gbp" in data:
+                    if "total_deposited_cash_gbp" in data:
+                        self.total_deposited_cash_gbp = float(data["total_deposited_cash_gbp"])
+                        self.starting_balance_gbp = self.total_deposited_cash_gbp
+                    elif "starting_balance_gbp" in data:
                         self.starting_balance_gbp = float(data["starting_balance_gbp"])
+                        self.total_deposited_cash_gbp = self.starting_balance_gbp
                     if "profit_lock_pct" in data:
                         self.profit_lock_pct = float(data["profit_lock_pct"])
                     if "locked_profit_gbp" in data:
@@ -65,13 +70,14 @@ class CapitalManager:
                         self.split_eth_pct = float(data["split_eth_pct"])
                     if "rungs_per_side" in data:
                         self.rungs_per_side = int(data["rungs_per_side"])
-                logger.info(f"Loaded capital state from {STATE_FILE} (starting_balance_gbp: £{self.starting_balance_gbp:.2f})")
+                logger.info(f"Loaded capital state from {STATE_FILE} (total_deposited_cash: £{self.total_deposited_cash_gbp:.2f})")
         except Exception as e:
             logger.warning(f"Failed to load capital state from {STATE_FILE}: {e}")
 
     def _save_state(self):
         try:
             data = {
+                "total_deposited_cash_gbp": self.total_deposited_cash_gbp,
                 "starting_balance_gbp": self.starting_balance_gbp,
                 "profit_lock_pct": self.profit_lock_pct,
                 "locked_profit_gbp": self.locked_profit_gbp,
@@ -263,6 +269,7 @@ class CapitalManager:
 
         if starting_balance_gbp is not None and starting_balance_gbp > 0:
             self.starting_balance_gbp = round(float(starting_balance_gbp), 2)
+            self.total_deposited_cash_gbp = self.starting_balance_gbp
             if self.balance_source == "PAPER_WALLET":
                 self.settled_cash_gbp = self.starting_balance_gbp
 
@@ -270,6 +277,19 @@ class CapitalManager:
             self.rungs_per_side = int(rungs_per_side)
 
         self._save_state()
+        return self.get_telemetry_dto()
+
+    def update_deposited_cash(self, amount: float) -> Dict[str, Any]:
+        """
+        Updates the explicit total deposited cash (cost basis) from the user/UI.
+        """
+        if amount > 0:
+            self.total_deposited_cash_gbp = round(float(amount), 2)
+            self.starting_balance_gbp = self.total_deposited_cash_gbp
+            if self.balance_source == "PAPER_WALLET":
+                self.settled_cash_gbp = self.total_deposited_cash_gbp
+            self._save_state()
+            logger.info(f"Updated total deposited cash basis to £{self.total_deposited_cash_gbp:.2f}")
         return self.get_telemetry_dto()
 
     def get_telemetry_dto(self) -> Dict[str, Any]:
@@ -283,6 +303,7 @@ class CapitalManager:
         return {
             "balance_source": self.balance_source,
             "starting_balance_gbp": self.starting_balance_gbp,
+            "total_deposited_cash_gbp": self.total_deposited_cash_gbp,
             "settled_cash_gbp": self.settled_cash_gbp,
             "cumulative_profit_gbp": self.cumulative_profit_gbp,
             "profit_lock_pct": self.profit_lock_pct,

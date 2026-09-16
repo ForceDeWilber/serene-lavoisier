@@ -198,6 +198,7 @@ class ConfigureCapitalRequest(BaseModel):
     split_btc_pct: Optional[float] = None
     split_eth_pct: Optional[float] = None
     starting_balance_gbp: Optional[float] = None
+    total_deposited_cash_gbp: Optional[float] = None
     rungs_per_side: Optional[int] = None
 
 @app.post("/api/capital/configure")
@@ -208,16 +209,30 @@ async def configure_capital(req: ConfigureCapitalRequest, mode: Optional[str] = 
         split_btc_ratio = (req.split_btc_pct / 100.0) if req.split_btc_pct is not None and req.split_btc_pct > 1.0 else req.split_btc_pct
         split_eth_ratio = (req.split_eth_pct / 100.0) if req.split_eth_pct is not None and req.split_eth_pct > 1.0 else req.split_eth_pct
         
+        deposit_val = req.total_deposited_cash_gbp if req.total_deposited_cash_gbp is not None else req.starting_balance_gbp
         dto = capital_manager.update_config(
             profit_lock_pct=profit_lock_ratio,
             split_btc_pct=split_btc_ratio,
             split_eth_pct=split_eth_ratio,
-            starting_balance_gbp=req.starting_balance_gbp,
+            starting_balance_gbp=deposit_val,
             rungs_per_side=req.rungs_per_side,
         )
         return {"status": "success", "payload": dto}
     except Exception as e:
         logger.error(f"Error configuring capital: {e}")
+        return {"status": "error", "error": str(e)}
+
+class DepositedCashRequest(BaseModel):
+    deposited_cash_gbp: float
+
+@app.post("/api/capital/deposited-cash")
+async def set_deposited_cash(req: DepositedCashRequest):
+    try:
+        from app.capital_manager import capital_manager
+        dto = capital_manager.update_deposited_cash(req.deposited_cash_gbp)
+        return {"status": "success", "payload": dto}
+    except Exception as e:
+        logger.error(f"Error setting deposited cash: {e}")
         return {"status": "error", "error": str(e)}
 
 class ModeRequest(BaseModel):
