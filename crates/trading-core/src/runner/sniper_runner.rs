@@ -106,23 +106,45 @@ impl SniperRunner {
         let telem_tx_clone = self.telemetry_tx.clone();
         let brain_clone = self.brain.clone();
 
-        // Background poller to refresh Revolut BBO every 2.5s without hammering Revolut API
+        // Stagger poll intervals based on runner symbol to prevent simultaneous burst requests
+        let initial_offset = match sym_poll.base.as_str() {
+            "BTC" => 0,
+            "ETH" => 1200,
+            "SOL" => 2400,
+            _ => 3600,
+        };
+
+        // Background poller to refresh Revolut BBO every 4.0s without hammering Revolut API
         let _poller = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(2500));
+            tokio::time::sleep(std::time::Duration::from_millis(initial_offset)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(4000));
             loop {
                 interval.tick().await;
-                let bbo = client_poll.get_bbo(&sym_poll).await.ok();
+
+                let total_balances = client_poll.get_balances().await.unwrap_or_default();
+                let total_quote = total_balances.get(&sym_poll.quote).copied().unwrap_or(Decimal::ZERO);
+
+                // If quote currency has no funded balance (e.g. USD is 0.00), skip order book polling
+                if total_quote < dec!(1.00) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+                    continue;
+                }
+
                 let raw_quote = client_poll.get_balance(&sym_poll.quote).await.unwrap_or(Decimal::ZERO);
                 let free_quote = if let Some(ref b) = brain_clone {
                     b.get_sniper_allocation(raw_quote, &[sym_poll.clone()])
                 } else {
                     raw_quote
                 };
+
+                let bbo = client_poll.get_bbo(&sym_poll).await.ok();
                 let mut updated = false;
                 if let Ok(mut state) = cached_clone.write() {
-                    state.bbo = bbo;
+                    if let Some(valid_bbo) = bbo {
+                        state.bbo = Some(valid_bbo);
+                    }
                     state.free_quote = free_quote;
-                    if let (Some((_, ask)), Some(k_mid)) = (bbo, state.kraken_price) {
+                    if let (Some((_, ask)), Some(k_mid)) = (state.bbo, state.kraken_price) {
                         if ask > Decimal::ZERO {
                             state.current_dislocation_pct = Some(((k_mid - ask) / ask * dec!(100.0)).round_dp(4));
                         }

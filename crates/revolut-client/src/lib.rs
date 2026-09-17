@@ -455,11 +455,13 @@ impl ExecutionClient for LiveRevolutClient {
         {
             let cache = self.cached_bbo.read().await;
             if let Some((cached_at, bbo)) = cache.get(&pair) {
-                if cached_at.elapsed() < Duration::from_millis(1500) {
+                if cached_at.elapsed() < Duration::from_millis(3000) {
                     return Ok(*bbo);
                 }
             }
         }
+
+        self.rate_limiter.acquire().await;
 
         let url = format!("{}/api/2.0/public/order-book/{}", self.base_url.trim_end_matches('/'), pair);
 
@@ -499,14 +501,16 @@ impl ExecutionClient for LiveRevolutClient {
 
         let best_bid = data
             .bids
-            .first()
-            .and_then(|l| Decimal::from_str(&l.price).ok())
+            .iter()
+            .filter_map(|l| Decimal::from_str(&l.price).ok())
+            .max()
             .ok_or_else(|| "Empty bids in Revolut X order book".to_string())?;
 
         let best_ask = data
             .asks
-            .first()
-            .and_then(|l| Decimal::from_str(&l.price).ok())
+            .iter()
+            .filter_map(|l| Decimal::from_str(&l.price).ok())
+            .min()
             .ok_or_else(|| "Empty asks in Revolut X order book".to_string())?;
 
         let bbo = (best_bid, best_ask);

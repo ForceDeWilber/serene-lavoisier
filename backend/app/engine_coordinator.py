@@ -128,6 +128,8 @@ class TradingEngineCoordinator:
                         "timestamp": tick.get("timestamp") if tick else None,
                     }
 
+                    snipers_by_symbol = {s.get("symbol"): s for s in snipers if s.get("symbol")}
+
                     # Build radar
                     def build_radar_item(s: str, pr: Optional[float], st: str, di: Optional[str]):
                         if pr is None:
@@ -139,20 +141,36 @@ class TradingEngineCoordinator:
                                 "current_dislocation_pct": 0.0, "in_snipe_zone": False,
                                 "direction": "NO_DATA", "lead_advantage_ms": 0,
                             }
-                        ask_markup = 1.0006 if "SOL" in s else 1.0005
-                        bid_markdown = 0.9994 if "SOL" in s else 0.9995
-                        rev_ask = round(pr * ask_markup, 2)
-                        rev_bid = round(pr * bid_markdown, 2)
-                        disloc = round(((pr - rev_ask) / rev_ask) * 100.0, 3)
+
+                        sn_data = snipers_by_symbol.get(s)
+                        has_live_bbo = sn_data and sn_data.get("revolut_best_ask") is not None and sn_data.get("revolut_best_bid") is not None
+                        if has_live_bbo:
+                            try:
+                                rev_ask = float(sn_data["revolut_best_ask"])
+                                rev_bid = float(sn_data["revolut_best_bid"])
+                            except (ValueError, TypeError):
+                                rev_ask = round(pr * 1.0005, 2)
+                                rev_bid = round(pr * 0.9995, 2)
+                        else:
+                            ask_markup = 1.0006 if "SOL" in s else 1.0005
+                            bid_markdown = 0.9994 if "SOL" in s else 0.9995
+                            rev_ask = round(pr * ask_markup, 2)
+                            rev_bid = round(pr * bid_markdown, 2)
+
+                        disloc = round(((pr - rev_ask) / rev_ask) * 100.0, 3) if rev_ask > 0 else 0.0
+                        lead_ms = int(sn_data.get("average_lead_ms", 450)) if sn_data else 450
+                        spread_gbp = round(rev_ask - rev_bid, 2)
+                        spread_pct = round(((rev_ask - rev_bid) / rev_bid) * 100.0, 3) if rev_bid > 0 else 0.0
+
                         return {
                             "symbol": s, "status": st, "disclaimer": di,
                             "kraken_price": pr, "revolut_best_bid": rev_bid, "revolut_best_ask": rev_ask,
-                            "revolut_spread_gbp": round(rev_ask - rev_bid, 2),
-                            "revolut_spread_pct": round(((rev_ask - rev_bid) / rev_bid) * 100.0, 3),
+                            "revolut_spread_gbp": spread_gbp,
+                            "revolut_spread_pct": spread_pct,
                             "buy_opportunity_pct": 0.12, "sell_opportunity_pct": 0.0,
                             "current_dislocation_pct": disloc, "in_snipe_zone": disloc >= 0.11,
                             "direction": "POSITIVE_DISLOCATION" if disloc > 0 else "NOMINAL",
-                            "lead_advantage_ms": 450,
+                            "lead_advantage_ms": lead_ms,
                         }
 
                     r_item = build_radar_item(sym, p, status_code, disc)
