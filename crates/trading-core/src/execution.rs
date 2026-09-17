@@ -20,8 +20,18 @@ pub trait ExecutionClient: Send + Sync {
     /// Get free available balance for a single currency
     async fn get_balance(&self, currency: &str) -> Result<Decimal, String>;
 
-    /// Get all account balances (e.g. GBP, BTC, ETH)
+    /// Get all account total balances (available + in orders)
     async fn get_balances(&self) -> Result<HashMap<String, Decimal>, String>;
+
+    /// Get all account free available balances (unreserved)
+    async fn get_available_balances(&self) -> Result<HashMap<String, Decimal>, String> {
+        self.get_balances().await
+    }
+
+    /// Get all account reserved balances (locked in open resting orders)
+    async fn get_reserved_balances(&self) -> Result<HashMap<String, Decimal>, String> {
+        Ok(HashMap::new())
+    }
 
     /// Get all currently active resting orders on the venue (for boot rehydration)
     async fn get_active_orders(&self) -> Result<Vec<Order>, String>;

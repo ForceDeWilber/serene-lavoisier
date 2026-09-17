@@ -123,6 +123,8 @@ pub enum IpcResponse {
         circuit_breaker_tripped: bool,
         circuit_breaker_reason: String,
         balances: HashMap<String, Decimal>,
+        available_balances: HashMap<String, Decimal>,
+        reserved_balances: HashMap<String, Decimal>,
         runners: Vec<RunnerTelemetryDto>,
         snipers: Vec<SniperTelemetryDto>,
         resting_orders_count: usize,
@@ -275,6 +277,8 @@ impl IpcServer {
                 Ok(req) => match req {
                     IpcRequest::GetTelemetry => {
                         let balances = client.get_balances().await.unwrap_or_default();
+                        let available_balances = client.get_available_balances().await.unwrap_or_default();
+                        let reserved_balances = client.get_reserved_balances().await.unwrap_or_default();
                         let active_orders_raw = client.get_active_orders().await.unwrap_or_default();
                         let cb_tripped = risk.is_circuit_breaker_tripped().await;
 
@@ -350,6 +354,8 @@ impl IpcServer {
                             circuit_breaker_tripped: cb_tripped,
                             circuit_breaker_reason: if cb_tripped { "Portfolio drawdown exceeded threshold" } else { "Normal" }.into(),
                             balances,
+                            available_balances,
+                            reserved_balances,
                             runners,
                             snipers,
                             resting_orders_count: active_dtos.len(),

@@ -171,8 +171,10 @@ class CapitalManager:
                     for item in data:
                         curr = item.get("currency")
                         avail = float(item.get("available", 0.0))
+                        resvd = float(item.get("reserved", 0.0))
+                        tot = float(item.get("total", avail + resvd))
                         if curr:
-                            balances[curr] = avail
+                            balances[curr] = tot
                     return balances
                 else:
                     logger.warning(f"Revolut X balances query returned HTTP {resp.status_code}: {resp.text}")

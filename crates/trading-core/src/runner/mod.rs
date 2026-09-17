@@ -281,7 +281,7 @@ impl GridRunner {
 
                     if should_init {
                         self.last_init_attempt = Some(tokio::time::Instant::now());
-                        let balances = self.execution_client.get_balances().await.ok();
+                        let balances = self.execution_client.get_available_balances().await.ok();
                         let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
                         let free_fiat = if let Some(ref brain) = self.brain {
                             let (sniper_res, _, allocations) = brain.partition_capital(total_quote, &[self.symbol.clone()]);
@@ -335,7 +335,7 @@ impl GridRunner {
                             self.risk_engine.release_order_capital(&ord).await;
                         }
                         // Re-initialize grid with live balances
-                        let balances = self.execution_client.get_balances().await.ok();
+                        let balances = self.execution_client.get_available_balances().await.ok();
                         let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
                         let free_fiat = if let Some(ref brain) = self.brain {
                             let (_, _, allocations) = brain.partition_capital(total_quote, &[self.symbol.clone()]);

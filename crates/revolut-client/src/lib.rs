@@ -42,12 +42,19 @@ pub struct RevolutOrderPayload {
 }
 
 /// Live HTTP/2 client for Revolut X with Ed25519 signing and rate limiting
+#[derive(Debug, Clone)]
+struct CachedBalanceSheet {
+    total: HashMap<String, Decimal>,
+    available: HashMap<String, Decimal>,
+    reserved: HashMap<String, Decimal>,
+}
+
 pub struct LiveRevolutClient {
     base_url: String,
     client: Client,
     signer: Ed25519Signer,
     rate_limiter: TokenBucketRateLimiter,
-    cached_balances: RwLock<Option<(Instant, HashMap<String, Decimal>)>>,
+    cached_balances: RwLock<Option<(Instant, CachedBalanceSheet)>>,
     cached_active_orders: RwLock<Option<(Instant, Vec<Order>)>>,
     cached_bbo: RwLock<HashMap<String, (Instant, (Decimal, Decimal))>>,
 }
@@ -166,6 +173,75 @@ impl LiveRevolutClient {
         );
         Ok(order.clone())
     }
+
+    async fn fetch_balance_sheet(&self) -> Result<CachedBalanceSheet, String> {
+        {
+            let cache = self.cached_balances.read().await;
+            if let Some((cached_at, ref sheet)) = *cache {
+                if cached_at.elapsed() < Duration::from_millis(1500) {
+                    return Ok(sheet.clone());
+                }
+            }
+        }
+
+        self.rate_limiter.acquire().await;
+
+        let timestamp = Utc::now().timestamp_millis();
+        let path = "/api/1.0/balances";
+        let signature = self.signer.sign_payload(timestamp, "GET", path, "");
+
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-Revx-API-Key", self.signer.api_key())
+            .header("X-Revx-Timestamp", timestamp.to_string())
+            .header("X-Revx-Signature", signature)
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("HTTP balance request error: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Revolut X balance fetch failed [HTTP {}]", resp.status()));
+        }
+
+        #[derive(Deserialize, Debug)]
+        struct BalanceEntry {
+            pub currency: Option<String>,
+            #[serde(default)]
+            pub available: Option<String>,
+            #[serde(default)]
+            pub reserved: Option<String>,
+            #[serde(default)]
+            pub total: Option<String>,
+        }
+
+        let entries: Vec<BalanceEntry> = resp.json().await.map_err(|e| format!("Failed to parse balances JSON: {}", e))?;
+        let mut total_map = HashMap::new();
+        let mut avail_map = HashMap::new();
+        let mut resvd_map = HashMap::new();
+        for entry in entries {
+            if let Some(curr) = entry.currency {
+                let curr_up = curr.to_uppercase();
+                let avail = entry.available.as_deref().and_then(|s| Decimal::from_str(s).ok()).unwrap_or(Decimal::ZERO);
+                let resvd = entry.reserved.as_deref().and_then(|s| Decimal::from_str(s).ok()).unwrap_or(Decimal::ZERO);
+                let tot = entry.total.as_deref().and_then(|s| Decimal::from_str(s).ok()).unwrap_or(avail + resvd);
+                total_map.insert(curr_up.clone(), tot);
+                avail_map.insert(curr_up.clone(), avail);
+                resvd_map.insert(curr_up, resvd);
+            }
+        }
+
+        let sheet = CachedBalanceSheet {
+            total: total_map,
+            available: avail_map,
+            reserved: resvd_map,
+        };
+
+        *self.cached_balances.write().await = Some((Instant::now(), sheet.clone()));
+        Ok(sheet)
+    }
 }
 
 #[async_trait]
@@ -247,61 +323,23 @@ impl ExecutionClient for LiveRevolutClient {
     }
 
     async fn get_balance(&self, currency: &str) -> Result<Decimal, String> {
-        let balances = self.get_balances().await?;
-        Ok(balances.get(currency).copied().unwrap_or(Decimal::ZERO))
+        let sheet = self.fetch_balance_sheet().await?;
+        Ok(sheet.available.get(currency).copied().unwrap_or(Decimal::ZERO))
     }
 
     async fn get_balances(&self) -> Result<HashMap<String, Decimal>, String> {
-        {
-            let cache = self.cached_balances.read().await;
-            if let Some((cached_at, ref map)) = *cache {
-                if cached_at.elapsed() < Duration::from_millis(1500) {
-                    return Ok(map.clone());
-                }
-            }
-        }
+        let sheet = self.fetch_balance_sheet().await?;
+        Ok(sheet.total)
+    }
 
-        self.rate_limiter.acquire().await;
+    async fn get_available_balances(&self) -> Result<HashMap<String, Decimal>, String> {
+        let sheet = self.fetch_balance_sheet().await?;
+        Ok(sheet.available)
+    }
 
-        let timestamp = Utc::now().timestamp_millis();
-        let path = "/api/1.0/balances";
-        let signature = self.signer.sign_payload(timestamp, "GET", path, "");
-
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .client
-            .get(&url)
-            .header("X-Revx-API-Key", self.signer.api_key())
-            .header("X-Revx-Timestamp", timestamp.to_string())
-            .header("X-Revx-Signature", signature)
-            .header(header::ACCEPT, "application/json")
-            .send()
-            .await
-            .map_err(|e| format!("HTTP balance request error: {}", e))?;
-
-        if !resp.status().is_success() {
-            return Err(format!("Revolut X balance fetch failed [HTTP {}]", resp.status()));
-        }
-
-        #[derive(Deserialize)]
-        struct BalanceEntry {
-            pub currency: Option<String>,
-            #[serde(default)]
-            pub available: Option<String>,
-        }
-
-        let entries: Vec<BalanceEntry> = resp.json().await.map_err(|e| format!("Failed to parse balances JSON: {}", e))?;
-        let mut map = HashMap::new();
-        for entry in entries {
-            if let (Some(curr), Some(avail_str)) = (entry.currency, entry.available) {
-                if let Ok(d) = Decimal::from_str(&avail_str) {
-                    map.insert(curr.to_uppercase(), d);
-                }
-            }
-        }
-
-        *self.cached_balances.write().await = Some((Instant::now(), map.clone()));
-        Ok(map)
+    async fn get_reserved_balances(&self) -> Result<HashMap<String, Decimal>, String> {
+        let sheet = self.fetch_balance_sheet().await?;
+        Ok(sheet.reserved)
     }
 
     async fn get_active_orders(&self) -> Result<Vec<Order>, String> {

@@ -222,6 +222,8 @@ interface TelemetryPayload {
   circuit_breaker_tripped: boolean;
   circuit_breaker_reason?: string;
   balances: Record<string, number>;
+  available_balances?: Record<string, number>;
+  reserved_balances?: Record<string, number>;
   portfolio?: {
     total_equity_gbp: number;
     total_deposited_cash_gbp?: number;
@@ -888,6 +890,7 @@ export default function ProductionDashboard() {
           {/* Dynamic Crypto Cards */}
           {activeAssets.map(asset => {
             const balance = telemetry?.balances?.[asset] ?? 0;
+            const inOrders = telemetry?.reserved_balances?.[asset] ?? 0;
             const priceInfo = telemetry?.market_prices?.[`${asset}/GBP`];
             const price = priceInfo?.price ?? null;
             const status = priceInfo?.status ?? "NO_DATA";
@@ -907,6 +910,11 @@ export default function ProductionDashboard() {
                 <div className="text-lg font-mono font-bold text-emerald-400 mt-1.5">
                   {balance.toFixed(6)} <span className="text-xs text-[#8b949e]">{asset}</span>
                 </div>
+                {inOrders > 0.0000001 ? (
+                  <div className="text-[10px] font-mono text-[#8b949e]">
+                    <span className="text-[#58a6ff]">{inOrders.toFixed(6)}</span> in orders
+                  </div>
+                ) : null}
                 <div className="text-[11px] font-mono text-[#8b949e] mt-0.5 flex items-center gap-1.5">
                   {price !== null ? (
                     <>

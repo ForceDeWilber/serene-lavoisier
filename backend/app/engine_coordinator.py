@@ -75,9 +75,36 @@ class TradingEngineCoordinator:
                 engine_mode = payload.get("trading_mode", "LIVE").upper()
                 is_live = engine_mode == "LIVE"
                 bals = {k: float(v) for k, v in payload.get("balances", {}).items()}
+                avail_bals = {k: float(v) for k, v in payload.get("available_balances", {}).items()}
+                resvd_bals = {k: float(v) for k, v in payload.get("reserved_balances", {}).items()}
                 runners = payload.get("runners", [])
                 snipers = payload.get("snipers", [])
                 active_orders = payload.get("active_orders", [])
+
+                # Safety reconciliation: if reserved_balances is empty or missing, derive from active_orders
+                if not resvd_bals and active_orders:
+                    for o in active_orders:
+                        side = o.get("side")
+                        sym = o.get("symbol", "")
+                        try:
+                            qty = float(o.get("qty", 0.0))
+                            val = float(o.get("value_gbp", 0.0))
+                        except (ValueError, TypeError):
+                            qty = 0.0
+                            val = 0.0
+                        if side == "SELL":
+                            base = sym.split("/")[0] if "/" in sym else sym
+                            resvd_bals[base] = round(resvd_bals.get(base, 0.0) + qty, 8)
+                        elif side == "BUY":
+                            resvd_bals["GBP"] = round(resvd_bals.get("GBP", 0.0) + val, 2)
+
+                # Ensure total balances include reserved if bals was only available
+                for k, res_val in resvd_bals.items():
+                    if res_val > 0:
+                        avail_val = avail_bals.get(k, bals.get(k, 0.0))
+                        # If total in bals doesn't reflect the reserved amount (was only available)
+                        if bals.get(k, 0.0) <= avail_val + 1e-7:
+                            bals[k] = round(avail_val + res_val, 8)
 
                 # Dynamically fetch prices for all tracked symbols
                 crypto_total = 0.0
@@ -324,6 +351,8 @@ class TradingEngineCoordinator:
                     "circuit_breaker_tripped": payload.get("circuit_breaker_tripped", False),
                     "circuit_breaker_reason": payload.get("circuit_breaker_reason", "Normal"),
                     "balances": bals,
+                    "available_balances": avail_bals,
+                    "reserved_balances": resvd_bals,
                     "portfolio": {
                         "total_equity_gbp": total_equity,
                         "total_deposited_cash_gbp": total_deposited,
@@ -341,7 +370,7 @@ class TradingEngineCoordinator:
                         "total_deposited_cash_gbp": total_deposited,
                         "starting_balance_gbp": total_deposited,
                         "settled_cash_gbp": gbp,
-                        "available_trading_power_gbp": gbp,
+                        "available_trading_power_gbp": avail_bals.get("GBP", gbp),
                         "reinvested_capital_gbp": round(total_equity - gbp, 2),
                         "locked_profit_vault_gbp": capital_manager.locked_profit_gbp,
                         "locked_profit_gbp": capital_manager.locked_profit_gbp,
