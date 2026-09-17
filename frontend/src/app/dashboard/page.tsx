@@ -1515,22 +1515,33 @@ export default function ProductionDashboard() {
                         const qNum = typeof ask.qty === "number" ? ask.qty : parseFloat(String(ask.qty)) || 0;
                         const dNum = typeof ask.distance_pct === "number" ? ask.distance_pct : parseFloat(String(ask.distance_pct)) || 0;
                         const w = maxQty > 0 ? (qNum / maxQty) * 100 : 0;
+                        const distStr = dNum > 0 ? `+${dNum.toFixed(2)}%` : `${dNum.toFixed(2)}%`;
                         return (
                           <div key={ask.id} className="relative flex px-2 py-0.5 group">
                             <div className="absolute top-0 bottom-0 right-0 bg-[#f85149]/10" style={{ width: `${w}%` }} />
                             <div className="flex-1 text-[#f85149] z-10">{pNum.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                             <div className="flex-1 text-right text-[#c9d1d9] z-10">{qNum.toFixed(6)}</div>
-                            <div className="flex-1 text-right text-[#f85149] z-10">+{dNum.toFixed(2)}%</div>
+                            <div className="flex-1 text-right text-[#f85149] z-10">{distStr}</div>
                           </div>
                         )
                       })}
                       
-                      {/* SPREAD INDICATOR */}
-                      <div className="my-1.5 flex items-center justify-center border-y border-[#30363d]/40 py-1 bg-[#161b22]">
-                        <span className="text-[10px] text-[#8b949e] font-semibold">
-                          MARKET MID
-                        </span>
-                      </div>
+                      {/* SPREAD INDICATOR / MARKET MID */}
+                      {(() => {
+                        const midPrice = telemetry?.market_prices?.[sym]?.price;
+                        return (
+                          <div className="my-1.5 flex items-center justify-between px-2 py-1 border-y border-[#30363d]/40 bg-[#161b22]">
+                            <span className="text-[10px] text-[#8b949e] font-semibold tracking-wider">
+                              MARKET MID
+                            </span>
+                            {midPrice ? (
+                              <span className="text-[10px] text-[#58a6ff] font-mono font-bold">
+                                £{midPrice.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                            ) : null}
+                          </div>
+                        );
+                      })()}
 
                       {/* BIDS */}
                       {bids.map(bid => {
@@ -1538,12 +1549,13 @@ export default function ProductionDashboard() {
                         const qNum = typeof bid.qty === "number" ? bid.qty : parseFloat(String(bid.qty)) || 0;
                         const dNum = typeof bid.distance_pct === "number" ? bid.distance_pct : parseFloat(String(bid.distance_pct)) || 0;
                         const w = maxQty > 0 ? (qNum / maxQty) * 100 : 0;
+                        const distStr = dNum > 0 ? `-${dNum.toFixed(2)}%` : `${dNum.toFixed(2)}%`;
                         return (
                           <div key={bid.id} className="relative flex px-2 py-0.5 group">
                             <div className="absolute top-0 bottom-0 right-0 bg-emerald-500/10" style={{ width: `${w}%` }} />
                             <div className="flex-1 text-emerald-400 z-10">{pNum.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                             <div className="flex-1 text-right text-[#c9d1d9] z-10">{qNum.toFixed(6)}</div>
-                            <div className="flex-1 text-right text-emerald-400 z-10">{dNum.toFixed(2)}%</div>
+                            <div className="flex-1 text-right text-emerald-400 z-10">{distStr}</div>
                           </div>
                         )
                       })}

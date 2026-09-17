@@ -281,22 +281,60 @@ impl IpcServer {
                         // Dynamic runner and sniper telemetry across all active pairs
                         let (runners, snipers) = manager.get_telemetry_dtos(&balances, &active_orders_raw).await;
 
+                        let mut symbol_prices: HashMap<String, Decimal> = HashMap::new();
+                        for s in &snipers {
+                            if let Some(kp) = s.kraken_price {
+                                if kp > Decimal::ZERO {
+                                    symbol_prices.insert(s.symbol.clone(), kp);
+                                }
+                            } else if let (Some(b), Some(a)) = (s.revolut_best_bid, s.revolut_best_ask) {
+                                let mid = (b + a) / Decimal::from(2);
+                                if mid > Decimal::ZERO {
+                                    symbol_prices.insert(s.symbol.clone(), mid);
+                                }
+                            }
+                        }
+                        for r in &runners {
+                            if !symbol_prices.contains_key(&r.symbol) {
+                                if let Some(ec) = r.effective_center {
+                                    if ec > Decimal::ZERO {
+                                        symbol_prices.insert(r.symbol.clone(), ec);
+                                    }
+                                } else if let Some(cp) = r.center_price {
+                                    if cp > Decimal::ZERO {
+                                        symbol_prices.insert(r.symbol.clone(), cp);
+                                    }
+                                }
+                            }
+                        }
+
                         let active_dtos: Vec<OrderTelemetryDto> = active_orders_raw
                             .iter()
                             .map(|o| {
                                 let val = (o.price * o.qty).round_dp(2);
+                                let sym_slash = o.symbol.as_slash();
+                                let dist = if let Some(mid) = symbol_prices.get(&sym_slash) {
+                                    if *mid > Decimal::ZERO && o.price > Decimal::ZERO {
+                                        ((o.price - *mid) / *mid * Decimal::from(100)).round_dp(2)
+                                    } else {
+                                        Decimal::ZERO
+                                    }
+                                } else {
+                                    Decimal::ZERO
+                                };
+
                                 OrderTelemetryDto {
                                     id: o.client_order_id.clone(),
                                     client_order_id: o.client_order_id.clone(),
                                     runner_id: o.runner_id.clone(),
-                                    symbol: o.symbol.as_slash(),
+                                    symbol: sym_slash,
                                     side: o.side.to_string().to_uppercase(),
                                     price: o.price,
                                     qty: o.qty,
                                     value_gbp: val,
                                     created_at: o.created_at.format("%H:%M:%S").to_string(),
                                     rung_level: if o.side == trading_core::model::OrderSide::Buy { -1 } else { 1 },
-                                    distance_pct: Decimal::ZERO,
+                                    distance_pct: dist,
                                     is_live: mode == "LIVE",
                                 }
                             })

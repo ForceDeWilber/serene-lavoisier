@@ -285,6 +285,33 @@ class TradingEngineCoordinator:
                     status = "INSUFFICIENT_FUNDS"
                     status_msg = "Revolut X account has £0.00 available GBP balance and no crypto assets."
 
+                # Augment resting orders with real-time distance_pct from live market mid
+                for o in active_orders:
+                    sym = o.get("symbol", "")
+                    try:
+                        px = float(o.get("price", 0.0))
+                    except (ValueError, TypeError):
+                        px = 0.0
+
+                    mid = None
+                    if sym in market_prices and market_prices[sym].get("price"):
+                        mid = market_prices[sym]["price"]
+                    elif sym.replace("/", "") in market_prices and market_prices[sym.replace("/", "")].get("price"):
+                        mid = market_prices[sym.replace("/", "")]["price"]
+                    else:
+                        p, _, _, _ = kraken_streamer.get_symbol_price(sym)
+                        if p and p > 0:
+                            mid = p
+
+                    if mid and mid > 0 and px > 0:
+                        dist = round(((px - mid) / mid) * 100.0, 2)
+                        o["distance_pct"] = dist
+                    elif "distance_pct" in o:
+                        try:
+                            o["distance_pct"] = round(float(o["distance_pct"]), 2)
+                        except (ValueError, TypeError):
+                            o["distance_pct"] = 0.0
+
                 return {
                     "mode": "live" if is_live else "paper",
                     "is_live": is_live,
