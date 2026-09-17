@@ -74,6 +74,6 @@ class TradeRecord(Base):
     fee_gbp = Column(Float)
     realized_pnl_gbp = Column(Float, default=0.0)
     
-    strategy_type = Column(String, default="Lead-Lag Dislocation")
+    strategy_type = Column(String, default="Maker Grid")
     execution_time = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 from app.database import LiveSessionLocal
-from app.models import TradeRecord
+from app.models import TradeRecord, OrderRecord
 from app.kraken_streamer import kraken_streamer
 
 logger = logging.getLogger("trade_sync_service")
@@ -223,6 +223,15 @@ class TradeSyncService:
                                     profit = (price * qty * step * fx_rate) - fee_gbp
                                 realized_pnl_gbp = round(max(0.0001, profit), 6)
                             
+                            # Check if the fill belongs to a sniper or grid runner
+                            strategy_type = "Maker Grid"
+                            if client_order_id:
+                                ord_stmt = select(OrderRecord.runner_id).where(OrderRecord.client_order_id == client_order_id)
+                                ord_res = await session.execute(ord_stmt)
+                                runner_id = ord_res.scalar()
+                                if runner_id and "sniper" in str(runner_id).lower():
+                                    strategy_type = "Lead-Lag Dislocation"
+
                             trade = TradeRecord(
                                 id=fill_id,
                                 client_order_id=client_order_id,
@@ -236,6 +245,7 @@ class TradeSyncService:
                                 value_gbp=value_gbp,
                                 fee_gbp=fee_gbp,
                                 realized_pnl_gbp=realized_pnl_gbp,
+                                strategy_type=strategy_type,
                                 execution_time=exec_time,
                             )
                             session.add(trade)
