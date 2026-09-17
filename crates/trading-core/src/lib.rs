@@ -92,6 +92,7 @@ mod tests {
                 ..Default::default()
             },
             mode: None,
+            cost_basis: None,
         };
         let mut strategy = GeometricGridStrategy::new(config);
         let center = dec!(50000.0);
@@ -112,6 +113,42 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_fiat_generates_sells_above_cost_basis() {
+        let config = GridConfig {
+            runner_id: "test_eth_runner".into(),
+            symbol: Symbol::eth_gbp(),
+            step_pct: dec!(0.004),
+            rungs_per_side: 3,
+            order_size_gbp: dec!(50.0),
+            rebalance_threshold_pct: dec!(0.012),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: Some(dec!(1845.43)), // Exact user ETH cost basis
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+        let center = dec!(1824.87); // Market is currently below cost basis!
+        let orders = strategy.initialize_grid(center, Some(dec!(0.0)), Some(dec!(0.00521505)));
+
+        let buys: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Buy).collect();
+        let sells: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Sell).collect();
+
+        // Zero fiat means 0 buys
+        assert_eq!(buys.len(), 0);
+        // Positive held base inventory means sell rungs are generated!
+        assert!(sells.len() > 0, "Expected sell orders to be placed from crypto inventory even with £0 fiat");
+
+        // Strict cost basis floor: every sell must be >= £1845.43 * 1.0015 = £1848.20
+        let floor = (dec!(1845.43) * dec!(1.0015)).round_dp(2);
+        for s in sells {
+            assert!(s.price >= floor, "Sell price {} was below cost basis floor {}", s.price, floor);
+            assert!(s.price * s.qty >= dec!(1.00), "Sell order value {} was below Revolut X £1.00 minimum", s.price * s.qty);
+        }
+    }
+
+    #[test]
     fn test_dynamic_grid_inventory_skew() {
         let config = GridConfig {
             runner_id: "test_skew_runner".into(),
@@ -122,6 +159,7 @@ mod tests {
             rebalance_threshold_pct: dec!(0.015),
             dynamic_pricing: DynamicPricingConfig::default(),
             mode: None,
+            cost_basis: None,
         };
         let mut strategy = GeometricGridStrategy::new(config);
         strategy.inventory_base = dec!(3.0); // positive inventory (long 3 BTC)

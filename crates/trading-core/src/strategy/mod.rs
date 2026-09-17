@@ -22,6 +22,8 @@ pub struct GridConfig {
     #[serde(default)]
     pub dynamic_pricing: DynamicPricingConfig,
     pub mode: Option<String>,
+    #[serde(default)]
+    pub cost_basis: Option<Decimal>,
 }
 
 pub struct GeometricGridStrategy {
@@ -132,31 +134,75 @@ impl GeometricGridStrategy {
             let mut current_sell_multiplier = one;
             let mut allocated_sell_base = Decimal::ZERO;
 
-            for _ in 1..=self.config.rungs_per_side {
-                current_sell_multiplier *= one + dynamic_step;
-                let rung_price = (effective_center * current_sell_multiplier).round_dp(2);
-                let desired_qty = (order_clip / rung_price).round_dp(6);
+            let total_inv_val = (base_avail * effective_center).round_dp(2);
+            let min_clip = dec!(1.00);
 
-                let remaining_base = base_avail - allocated_sell_base;
-                if remaining_base <= Decimal::ZERO {
-                    break;
+            if total_inv_val >= min_clip {
+                let sell_clip = if order_clip >= min_clip {
+                    order_clip.min(total_inv_val)
+                } else {
+                    let rungs_dec = Decimal::from(self.config.rungs_per_side.max(1));
+                    let per_rung = (total_inv_val / rungs_dec).round_dp(2);
+                    per_rung.min(self.config.order_size_gbp).max(min_clip)
+                };
+
+                // Strict No-Loss Floor: Ensure sell price is at or above cost basis (+0.15% minimum profit margin)
+                let min_profit_multiplier = dec!(1.0015);
+                let floor_price = self.config.cost_basis.map(|cb| (cb * min_profit_multiplier).round_dp(2));
+
+                for _ in 1..=self.config.rungs_per_side {
+                    current_sell_multiplier *= one + dynamic_step;
+                    let mut rung_price = (effective_center * current_sell_multiplier).round_dp(2);
+
+                    if let Some(floor) = floor_price {
+                        if rung_price < floor {
+                            rung_price = floor;
+                        }
+                    }
+
+                    if rung_price <= Decimal::ZERO {
+                        continue;
+                    }
+
+                    let desired_qty = (sell_clip / rung_price).round_dp(6);
+                    let remaining_base = base_avail - allocated_sell_base;
+                    if remaining_base <= Decimal::ZERO {
+                        break;
+                    }
+
+                    let qty = desired_qty.min(remaining_base);
+                    if qty <= Decimal::ZERO {
+                        break;
+                    }
+
+                    // Check minimum order size on Revolut X (>= 1.00 in quote currency)
+                    if (qty * rung_price).round_dp(2) < min_clip {
+                        if (remaining_base * rung_price).round_dp(2) >= min_clip {
+                            let sweep_qty = remaining_base;
+                            allocated_sell_base += sweep_qty;
+                            let order = Order::new_limit_post_only(
+                                &self.config.runner_id,
+                                self.config.symbol.clone(),
+                                OrderSide::Sell,
+                                rung_price,
+                                sweep_qty,
+                            );
+                            new_orders.push(order);
+                        }
+                        break;
+                    }
+
+                    allocated_sell_base += qty;
+
+                    let order = Order::new_limit_post_only(
+                        &self.config.runner_id,
+                        self.config.symbol.clone(),
+                        OrderSide::Sell,
+                        rung_price,
+                        qty,
+                    );
+                    new_orders.push(order);
                 }
-
-                let qty = desired_qty.min(remaining_base);
-                if qty <= Decimal::ZERO {
-                    break;
-                }
-
-                allocated_sell_base += qty;
-
-                let order = Order::new_limit_post_only(
-                    &self.config.runner_id,
-                    self.config.symbol.clone(),
-                    OrderSide::Sell,
-                    rung_price,
-                    qty,
-                );
-                new_orders.push(order);
             }
         }
 

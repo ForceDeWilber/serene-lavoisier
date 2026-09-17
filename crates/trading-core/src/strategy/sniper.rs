@@ -81,7 +81,7 @@ impl LeadLagSniperStrategy {
 
             if gross_edge >= self.config.impulse_threshold_pct && net_edge >= self.config.min_net_edge_pct {
                 let size_gbp = self.config.order_size_gbp.min(free_gbp);
-                if size_gbp < dec!(2.0) {
+                if size_gbp < dec!(1.00) {
                     return None;
                 }
 

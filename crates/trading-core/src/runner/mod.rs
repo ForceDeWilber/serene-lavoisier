@@ -50,6 +50,7 @@ pub struct GridRunner {
     db: Option<Arc<crate::db::DbStore>>,
     telemetry_tx: Option<watch::Sender<RunnerTelemetry>>,
     brain: Option<Arc<crate::brain::EngineBrain>>,
+    last_init_attempt: Option<tokio::time::Instant>,
 }
 
 impl GridRunner {
@@ -77,6 +78,7 @@ impl GridRunner {
             db,
             telemetry_tx: None,
             brain: None,
+            last_init_attempt: None,
         }
     }
 
@@ -272,16 +274,21 @@ impl GridRunner {
                         }
                     }
 
-                    // 4. Initialize grid if not yet initialized
-                    if self.strategy.center_price.is_none() && mid_price > Decimal::ZERO {
+                    // 4. Initialize grid if not yet initialized or if active orders are empty
+                    let should_init = (self.strategy.center_price.is_none() || self.strategy.active_orders.is_empty())
+                        && mid_price > Decimal::ZERO
+                        && self.last_init_attempt.map_or(true, |t| t.elapsed() >= tokio::time::Duration::from_secs(10));
+
+                    if should_init {
+                        self.last_init_attempt = Some(tokio::time::Instant::now());
                         let balances = self.execution_client.get_balances().await.ok();
                         let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
                         let free_fiat = if let Some(ref brain) = self.brain {
                             let (sniper_res, _, allocations) = brain.partition_capital(total_quote, &[self.symbol.clone()]);
                             let pair_budget = allocations.get(&self.symbol.as_slash()).copied().unwrap_or(Decimal::ZERO);
                             info!(
-                                "[BRAIN-PARTITION] [{}] Cash £{:.2} partitioned: £{:.2} to Sniper reserve, £{:.2} to {}",
-                                self.runner_id, total_quote, sniper_res, pair_budget, self.symbol
+                                "[BRAIN-PARTITION] [{}] Cash {} {:.2} partitioned: {:.2} to Sniper reserve, {:.2} to {}",
+                                self.runner_id, self.symbol.quote, total_quote, sniper_res, pair_budget, self.symbol
                             );
                             self.risk_engine.register_envelope(&self.runner_id, &self.symbol.quote, pair_budget).await;
                             Some(pair_budget)
@@ -291,8 +298,8 @@ impl GridRunner {
                         let available_base = balances.as_ref().map(|b| b.get(&self.symbol.base).copied().unwrap_or(Decimal::ZERO));
 
                         info!(
-                            "[ORDER-INTENT] [{}] Initializing grid: mid=£{:.2}, {} rungs/side (allocated budget: {:?}, base balance: {:?})",
-                            self.runner_id, mid_price, self.strategy.config.rungs_per_side, free_fiat, available_base
+                            "[ORDER-INTENT] [{}] Initializing grid: mid={}{:.2}, {} rungs/side (allocated budget: {:?}, base balance: {:?})",
+                            self.runner_id, if self.symbol.quote == "USD" { "$" } else { "£" }, mid_price, self.strategy.config.rungs_per_side, free_fiat, available_base
                         );
                         let initial_orders = self.strategy.initialize_grid(mid_price, free_fiat, available_base);
                         for order in initial_orders {

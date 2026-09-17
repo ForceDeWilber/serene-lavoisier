@@ -103,6 +103,19 @@ impl RunnerManager {
         });
 
         // 4. Create Grid Runner
+        let cost_basis = match config.symbol.base.as_str() {
+            "BTC" => {
+                if config.symbol.quote == "GBP" { Some(dec!(57019.97)) } else { Some(dec!(76350.00)) }
+            }
+            "ETH" => {
+                if config.symbol.quote == "GBP" { Some(dec!(1845.43)) } else { Some(dec!(2470.00)) }
+            }
+            "SOL" => {
+                if config.symbol.quote == "GBP" { Some(dec!(74.79)) } else { Some(dec!(100.10)) }
+            }
+            _ => None,
+        };
+
         let grid_config = GridConfig {
             runner_id: grid_id.clone(),
             symbol: config.symbol.clone(),
@@ -112,6 +125,7 @@ impl RunnerManager {
             rebalance_threshold_pct: config.rebalance_threshold_pct,
             dynamic_pricing: trading_core::strategy::DynamicPricingConfig::default(),
             mode: None,
+            cost_basis,
         };
 
         let grid_runner = GridRunner::new(
@@ -170,13 +184,17 @@ impl RunnerManager {
         .with_telemetry_channel(sniper_telem_tx);
 
         // 6. Spawn independent Tokio tasks
-        tokio::spawn(async move {
-            grid_runner.run().await;
-        });
+        if config.grid_rungs > 0 {
+            tokio::spawn(async move {
+                grid_runner.run().await;
+            });
+        }
 
-        tokio::spawn(async move {
-            sniper_runner.run().await;
-        });
+        if config.sniper_enabled {
+            tokio::spawn(async move {
+                sniper_runner.run().await;
+            });
+        }
 
         // 7. Store pair handle
         let handle = PairHandle {
