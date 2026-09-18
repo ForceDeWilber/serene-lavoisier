@@ -1071,7 +1071,11 @@ export default function ProductionDashboard() {
             const revAsk = radar?.revolut_best_ask ?? (krakenP !== null ? krakenP * 1.0005 : null);
             const dislocation = krakenP !== null ? (radar?.current_dislocation_pct ?? 0.0) : 0.0;
             const targetHurdle = 0.110;
+            const quoteAsset = sym.includes("USD") ? "USD" : "GBP";
+            const quoteBal = (quoteAsset === "USD" ? telemetry?.available_balances?.USD : telemetry?.available_balances?.GBP) ?? 0;
+            const hasFunds = quoteBal >= 1.00;
             const meetsHurdle = krakenP !== null && dislocation >= targetHurdle;
+            const isReadyToFire = meetsHurdle && hasFunds;
             const leadMs = radar?.lead_advantage_ms ?? 450;
             const statusStr = radar?.status ?? mkt?.status ?? "NO_DATA";
             const disclaimer = radar?.disclaimer ?? mkt?.disclaimer ?? null;
@@ -1091,7 +1095,7 @@ export default function ProductionDashboard() {
               <div
                 key={sym}
                 className={`bg-[#0d1117] border rounded-xl p-3.5 space-y-3 transition ${
-                  meetsHurdle ? "border-emerald-500/60 shadow-md shadow-emerald-950/20" : "border-[#30363d]"
+                  isReadyToFire ? "border-emerald-500/60 shadow-md shadow-emerald-950/20" : meetsHurdle ? "border-amber-500/50" : "border-[#30363d]"
                 }`}
               >
                 {/* Header */}
@@ -1107,16 +1111,20 @@ export default function ProductionDashboard() {
                       ? "bg-amber-500/10 text-amber-400 border border-amber-500/30"
                       : statusStr === "NO_DATA"
                       ? "bg-[#161b22] text-[#8b949e] border border-[#30363d]"
-                      : meetsHurdle
+                      : isReadyToFire
                       ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 animate-pulse"
+                      : meetsHurdle
+                      ? "bg-amber-500/20 text-amber-400 border border-amber-500/40"
                       : "bg-[#161b22] text-[#58a6ff] border border-[#30363d]"
                   }`}>
                     {statusStr === "OUTDATED"
                       ? (disclaimer || "Outdated")
                       : statusStr === "NO_DATA"
                       ? "No Data"
+                      : isReadyToFire
+                      ? "Threshold Met · Armed"
                       : meetsHurdle
-                      ? "Threshold Met"
+                      ? `No Free ${quoteAsset}`
                       : "Monitoring"}
                   </span>
                 </div>
@@ -1207,11 +1215,13 @@ export default function ProductionDashboard() {
                   <div className="bg-[#161b22] p-2 rounded border border-[#30363d] text-[10px] space-y-1 text-[#8b949e]">
                     <div className="flex justify-between">
                       <span>Status:</span>
-                      <span className={meetsHurdle ? "text-emerald-400 font-medium" : "text-[#c9d1d9]"}>
+                      <span className={isReadyToFire ? "text-emerald-400 font-medium" : meetsHurdle ? "text-amber-400 font-medium" : "text-[#c9d1d9]"}>
                         {krakenP === null
                           ? "Awaiting Feed"
-                          : meetsHurdle
+                          : isReadyToFire
                           ? "Threshold Met · Ready to Execute"
+                          : meetsHurdle
+                          ? `Threshold Met · Insufficient ${quoteAsset} (${quoteAsset === "USD" ? "$" : "£"}${quoteBal.toFixed(2)} free / min ${quoteAsset === "USD" ? "$1.00" : "£1.00"})`
                           : `${deficit.toFixed(3)}% below trigger`}
                       </span>
                     </div>

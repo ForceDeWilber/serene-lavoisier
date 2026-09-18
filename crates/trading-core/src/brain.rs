@@ -45,7 +45,7 @@ pub struct BrainTelemetryDto {
 #[derive(Debug)]
 pub struct EngineBrain {
     pub config: RwLock<BrainConfig>,
-    pub last_known_cash: RwLock<Decimal>,
+    pub last_known_cash: RwLock<HashMap<String, Decimal>>,
 }
 
 impl Default for EngineBrain {
@@ -58,8 +58,35 @@ impl EngineBrain {
     pub fn new(config: BrainConfig) -> Self {
         Self {
             config: RwLock::new(config),
-            last_known_cash: RwLock::new(Decimal::ZERO),
+            last_known_cash: RwLock::new(HashMap::new()),
         }
+    }
+
+    pub fn update_cash(&self, currency: &str, cash: Decimal) {
+        if let Ok(mut map) = self.last_known_cash.write() {
+            map.insert(currency.to_string(), cash);
+        }
+    }
+
+    pub fn deduct_cash(&self, currency: &str, amount: Decimal) {
+        if let Ok(mut map) = self.last_known_cash.write() {
+            let entry = map.entry(currency.to_string()).or_insert(Decimal::ZERO);
+            *entry = (*entry - amount).max(Decimal::ZERO);
+        }
+    }
+
+    pub fn zero_cash(&self, currency: &str) {
+        if let Ok(mut map) = self.last_known_cash.write() {
+            map.insert(currency.to_string(), Decimal::ZERO);
+        }
+    }
+
+    pub fn get_cash(&self, currency: &str) -> Decimal {
+        self.last_known_cash
+            .read()
+            .ok()
+            .and_then(|map| map.get(currency).copied())
+            .unwrap_or(Decimal::ZERO)
     }
 
     pub fn partition_capital(

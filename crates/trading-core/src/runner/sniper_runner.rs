@@ -132,6 +132,7 @@ impl SniperRunner {
 
                 let raw_quote = client_poll.get_balance(&sym_poll.quote).await.unwrap_or(Decimal::ZERO);
                 let free_quote = if let Some(ref b) = brain_clone {
+                    b.update_cash(&sym_poll.quote, raw_quote);
                     b.get_sniper_allocation(raw_quote, &[sym_poll.clone()])
                 } else {
                     raw_quote
@@ -203,13 +204,25 @@ impl SniperRunner {
                     let (rev_bid, rev_ask, free_quote) = {
                         if let Ok(state) = self.cached_state.read() {
                             match state.bbo {
-                                Some((bid, ask)) => (bid, ask, state.free_quote),
+                                Some((bid, ask)) => {
+                                    let brain_cash = if let Some(ref b) = self.brain {
+                                        let c = b.get_cash(&self.symbol.quote);
+                                        b.get_sniper_allocation(c, &[self.symbol.clone()]).min(state.free_quote)
+                                    } else {
+                                        state.free_quote
+                                    };
+                                    (bid, ask, brain_cash)
+                                }
                                 None => continue,
                             }
                         } else {
                             continue;
                         }
                     };
+
+                    if free_quote < dec!(1.00) {
+                        continue;
+                    }
 
                     if let Some(opp) = self.strategy.evaluate_dislocation(kraken_mid, rev_bid, rev_ask, free_quote) {
                         self.in_flight = true;
@@ -237,57 +250,65 @@ impl SniperRunner {
                                     self.runner_id, filled_snipe.qty, self.symbol, filled_snipe.price, lead_ms, filled_snipe.client_order_id
                                 );
 
+                                // Immediately deduct spent cash from shared brain and cache
+                                let spent = filled_snipe.price * filled_snipe.qty;
+                                if let Some(ref b) = self.brain {
+                                    b.deduct_cash(&self.symbol.quote, spent);
+                                }
+                                if let Ok(mut state) = self.cached_state.write() {
+                                    state.free_quote = (state.free_quote - spent).max(Decimal::ZERO);
+                                }
+
                                 // Leg 2: Immediate Maker Profit Exit limit sell at target price
+                                let tick_size = if self.symbol.base == "BTC" { dec!(0.10) } else { dec!(0.02) };
+                                let target_exit_price = opp.target_price.max(rev_bid + tick_size).round_dp(2);
+
                                 let exit_order = Order::new_limit_post_only(
                                     &self.runner_id,
                                     self.symbol.clone(),
                                     OrderSide::Sell,
-                                    opp.target_price,
-                                    opp.qty,
+                                    target_exit_price,
+                                    filled_snipe.qty,
                                 );
 
                                 let client_clone = self.execution_client.clone();
-                                let exit_ord_id = exit_order.client_order_id.clone();
                                 let timeout_ms = self.strategy.config.scratch_timeout_ms;
                                 let runner_tag = self.runner_id.clone();
                                 let sym_scratch = self.symbol.clone();
-                                let opp_qty = opp.qty;
+                                let opp_qty = filled_snipe.qty;
+                                let entry_p = filled_snipe.price;
 
                                 match self.execution_client.submit_post_only_order(&exit_order).await {
-                                    Ok(_) => {
+                                    Ok(submitted_exit) => {
+                                        let exit_ord_id = submitted_exit.client_order_id.clone();
                                         info!(
                                             "[ORDER-DISPATCH] [{}] Placed Leg 2 profit exit Maker rung @ £{} for {} {} (Scratch watchdog: {}ms, {})",
-                                            self.runner_id, opp.target_price, opp.qty, self.symbol, timeout_ms, exit_order.client_order_id
+                                            self.runner_id, target_exit_price, opp_qty, self.symbol, timeout_ms, exit_ord_id
                                         );
 
                                         // Spawn watchdog to scratch trade if maker exit doesn't fill
+                                        let c_clone = client_clone.clone();
+                                        let r_tag = runner_tag.clone();
+                                        let s_scratch = sym_scratch.clone();
                                         tokio::spawn(async move {
                                             tokio::time::sleep(tokio::time::Duration::from_millis(timeout_ms)).await;
-                                            if let Ok(active) = client_clone.get_active_orders().await {
+                                            if let Ok(active) = c_clone.get_active_orders().await {
                                                 if active.iter().any(|o| o.client_order_id == exit_ord_id) {
-                                                    warn!("[SNIPER-SCRATCH] [{}] Snipe exit timed out after {}ms! Scratching unhedged position...", runner_tag, timeout_ms);
-                                                    match client_clone.cancel_order(&exit_ord_id).await {
-                                                        Ok(_) => info!("[ORDER-CANCEL] [{}] Canceled timed-out maker exit {}", runner_tag, exit_ord_id),
-                                                        Err(e) => error!("[ORDER-CANCEL-FAIL] [{}] Failed to cancel timed-out maker exit {}: {}", runner_tag, exit_ord_id, e),
-                                                    }
+                                                    warn!("[SNIPER-SCRATCH] [{}] Snipe exit timed out after {}ms! Scratching unhedged position...", r_tag, timeout_ms);
+                                                    let _ = c_clone.cancel_order(&exit_ord_id).await;
                                                     // Liquidate unhedged inventory immediately at top bid
-                                                    match client_clone.get_bbo(&sym_scratch).await {
-                                                        Ok((bbo_bid, _)) if bbo_bid > Decimal::ZERO => {
+                                                    if let Ok((bbo_bid, _)) = c_clone.get_bbo(&s_scratch).await {
+                                                        if bbo_bid > Decimal::ZERO {
                                                             let scratch_order = Order::new_limit_taker(
-                                                                &runner_tag,
-                                                                sym_scratch.clone(),
+                                                                &r_tag,
+                                                                s_scratch.clone(),
                                                                 OrderSide::Sell,
                                                                 bbo_bid,
                                                                 opp_qty,
                                                             );
-                                                            info!("[SNIPER-SCRATCH-DISPATCH] [{}] Submitting market liquidation sell for {} {} @ £{} ({})", runner_tag, opp_qty, sym_scratch, bbo_bid, scratch_order.client_order_id);
-                                                            match client_clone.submit_taker_order(&scratch_order).await {
-                                                                Ok(filled) => info!("[SNIPER-SCRATCH-FILLED] [{}] Liquidated unhedged position: {} {} @ £{}", runner_tag, filled.qty, sym_scratch, filled.price),
-                                                                Err(e) => error!("[SNIPER-SCRATCH-FAILED] [{}] Emergency liquidation failed: {}", runner_tag, e),
-                                                            }
+                                                            info!("[SNIPER-SCRATCH-DISPATCH] [{}] Submitting market liquidation sell for {} {} @ £{} ({})", r_tag, opp_qty, s_scratch, bbo_bid, scratch_order.client_order_id);
+                                                            let _ = c_clone.submit_taker_order(&scratch_order).await;
                                                         }
-                                                        Ok((bbo_bid, _)) => error!("[SNIPER-SCRATCH-FAILED] [{}] Top bid is zero (£{}), cannot liquidate", runner_tag, bbo_bid),
-                                                        Err(e) => error!("[SNIPER-SCRATCH-FAILED] [{}] Failed to fetch BBO for liquidation: {}", runner_tag, e),
                                                     }
                                                 }
                                             }
@@ -298,12 +319,92 @@ impl SniperRunner {
                                         self.publish_telemetry();
                                     }
                                     Err(e) => {
-                                        error!("[ORDER-REJECT] [{}] Failed to place profit exit order: {}", self.runner_id, e);
+                                        warn!("[ORDER-REJECT] [{}] Leg 2 post-only profit exit rejected: {}. Initiating dynamic exit fallback...", self.runner_id, e);
+                                        // Market surged into bid or crossed spread. Fetch fresh BBO to reprice or liquidate.
+                                        match client_clone.get_bbo(&self.symbol).await {
+                                            Ok((fresh_bid, fresh_ask)) if fresh_bid > Decimal::ZERO => {
+                                                if fresh_bid > entry_p {
+                                                    // Buyers are bidding above our entry price: try repriced maker at fresh_ask
+                                                    let repriced_target = fresh_ask.max(fresh_bid + tick_size).round_dp(2);
+                                                    let repriced_order = Order::new_limit_post_only(
+                                                        &self.runner_id,
+                                                        self.symbol.clone(),
+                                                        OrderSide::Sell,
+                                                        repriced_target,
+                                                        opp_qty,
+                                                    );
+                                                    let rep_id = repriced_order.client_order_id.clone();
+                                                    match client_clone.submit_post_only_order(&repriced_order).await {
+                                                        Ok(_submitted) => {
+                                                            info!("[ORDER-DISPATCH] [{}] Repriced Leg 2 maker rung placed @ £{} ({})", self.runner_id, repriced_target, rep_id);
+                                                            let c_clone2 = client_clone.clone();
+                                                            let r_tag2 = self.runner_id.clone();
+                                                            let sym2 = self.symbol.clone();
+                                                            tokio::spawn(async move {
+                                                                tokio::time::sleep(tokio::time::Duration::from_millis(timeout_ms)).await;
+                                                                if let Ok(active) = c_clone2.get_active_orders().await {
+                                                                    if active.iter().any(|o| o.client_order_id == rep_id) {
+                                                                        let _ = c_clone2.cancel_order(&rep_id).await;
+                                                                        if let Ok((b_bid, _)) = c_clone2.get_bbo(&sym2).await {
+                                                                            if b_bid > Decimal::ZERO {
+                                                                                let so = Order::new_limit_taker(&r_tag2, sym2, OrderSide::Sell, b_bid, opp_qty);
+                                                                                let _ = c_clone2.submit_taker_order(&so).await;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            });
+                                                        }
+                                                        Err(_) => {
+                                                            // Maker failed again: lock in profit directly via immediate taker exit at fresh_bid!
+                                                            info!("[SNIPER-EXIT-TAKER] [{}] Locking in profit via immediate taker exit @ £{}", self.runner_id, fresh_bid);
+                                                            let taker_exit = Order::new_limit_taker(
+                                                                &self.runner_id,
+                                                                self.symbol.clone(),
+                                                                OrderSide::Sell,
+                                                                fresh_bid,
+                                                                opp_qty,
+                                                            );
+                                                            match client_clone.submit_taker_order(&taker_exit).await {
+                                                                Ok(filled) => info!("[SNIPER-EXIT-FILLED] [{}] Sold {} {} @ £{} (Instant Taker Exit)", self.runner_id, filled.qty, self.symbol, filled.price),
+                                                                Err(err) => error!("[SNIPER-EXIT-FAILED] [{}] Immediate taker exit failed: {}", self.runner_id, err),
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    // Bid is below entry; place resting maker above entry to avoid selling at loss
+                                                    let breakeven_maker = (entry_p * dec!(1.0020)).max(fresh_bid + tick_size).round_dp(2);
+                                                    let safe_order = Order::new_limit_post_only(
+                                                        &self.runner_id,
+                                                        self.symbol.clone(),
+                                                        OrderSide::Sell,
+                                                        breakeven_maker,
+                                                        opp_qty,
+                                                    );
+                                                    let _ = client_clone.submit_post_only_order(&safe_order).await;
+                                                }
+                                            }
+                                            Ok((_, _)) => {
+                                                error!("[SNIPER-FALLBACK-FAIL] [{}] Best bid is non-positive, cannot execute fallback", self.runner_id);
+                                            }
+                                            Err(bbo_err) => {
+                                                error!("[SNIPER-FALLBACK-FAIL] [{}] Could not fetch BBO for fallback: {}", self.runner_id, bbo_err);
+                                            }
+                                        }
                                     }
                                 }
                             }
                             Err(e) => {
                                 warn!("[ORDER-REJECT] [{}] Taker snipe order rejected or missed window: {}", self.runner_id, e);
+                                if e.contains("Not enough funds") || e.contains("insufficient") || e.contains("422") {
+                                    warn!("[SNIPER-FUNDS] Insufficient {} funds on venue: zeroing cached free_quote", self.symbol.quote);
+                                    if let Some(ref b) = self.brain {
+                                        b.zero_cash(&self.symbol.quote);
+                                    }
+                                    if let Ok(mut state) = self.cached_state.write() {
+                                        state.free_quote = Decimal::ZERO;
+                                    }
+                                }
                             }
                         }
 
