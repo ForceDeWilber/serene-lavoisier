@@ -24,7 +24,7 @@ export function TerminalLogPane({ telemetry, statusMessage }: Props) {
       <div className="bg-gray-900 border-b border-gray-800 px-2 py-1 flex items-center justify-between">
         <span className="text-gray-300 font-semibold uppercase">TERMINAL_LOG</span>
         <span className="text-gray-500 text-[10px]">
-          {engineActivity?.oracle_latency_ms || '--'}ms LATENCY
+          {engineActivity?.oracle_latency_ms ?? '--'}ms LATENCY
         </span>
       </div>
 
@@ -40,7 +40,7 @@ export function TerminalLogPane({ telemetry, statusMessage }: Props) {
         <div className="text-blue-400/70 py-1">
           -------------------------------------------------<br/>
           RUST EXECUTION CORE ACTIVE<br/>
-          TRADING_MODE: {telemetry?.mode?.toUpperCase() || 'UNKNOWN'}<br/>
+          TRADING_MODE: {String(telemetry?.mode || 'LIVE').toUpperCase()}<br/>
           CIRCUIT_BREAKER: {telemetry?.circuit_breaker_tripped ? 'TRIPPED' : 'NORMAL'}<br/>
           ACTIVE_RUNNERS: {telemetry?.runners?.length || 0}<br/>
           -------------------------------------------------

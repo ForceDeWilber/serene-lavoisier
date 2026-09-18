@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { TelemetryPayload } from "../../types/telemetry";
+import { formatNum, formatGbp, toNum } from "../../lib/format";
 
 interface Props {
   telemetry: TelemetryPayload | null;
@@ -15,10 +16,12 @@ export function GridPane({ telemetry, onTuneRunner }: Props) {
     if (runners.length > 0) {
       const updated = { ...localParams };
       runners.forEach((r) => {
-        if (r.step_pct && !localParams[r.runner_id]) {
+        if (!localParams[r.runner_id]) {
+          const stepVal = toNum(r.step_pct, toNum(r.dynamic_step_pct, 0.004));
+          const rebalVal = toNum(r.rebalance_threshold_pct, 0.02);
           updated[r.runner_id] = {
-            step_pct: (r.step_pct * 100).toFixed(2),
-            rebalance_pct: (r.rebalance_threshold_pct ? r.rebalance_threshold_pct * 100 : 2.0).toFixed(1),
+            step_pct: (stepVal * 100).toFixed(2),
+            rebalance_pct: (rebalVal * 100).toFixed(1),
           };
         }
       });
@@ -44,20 +47,21 @@ export function GridPane({ telemetry, onTuneRunner }: Props) {
           ) : (
             runners.map(runner => {
               const p = localParams[runner.runner_id] || { step_pct: '0.40', rebalance_pct: '2.0' };
+              const pnlVal = toNum(runner.realized_pnl, 0);
               return (
                 <div key={runner.runner_id} className="border border-gray-800 p-2 flex flex-col gap-2">
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-blue-400">{runner.symbol}</span>
-                    <span className={runner.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                      £{runner.realized_pnl.toFixed(2)}
+                    <span className={pnlVal >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      {formatGbp(runner.realized_pnl, 2, true)}
                     </span>
                   </div>
                   
                   <div className="grid grid-cols-2 gap-2 text-[10px]">
-                    <div>CENTER: <span className="text-gray-200">£{runner.center_price?.toFixed(2) || '---'}</span></div>
-                    <div>INV: <span className="text-gray-200">{runner.inventory_base.toFixed(4)}</span></div>
-                    <div>ORDERS: <span className="text-gray-200">{runner.active_orders_count}</span></div>
-                    <div>TRADES: <span className="text-gray-200">{runner.total_trades}</span></div>
+                    <div>CENTER: <span className="text-gray-200">£{formatNum(runner.center_price ?? runner.effective_center, 2)}</span></div>
+                    <div>INV: <span className="text-gray-200">{formatNum(runner.inventory_base, 4)}</span></div>
+                    <div>ORDERS: <span className="text-gray-200">{runner.active_orders_count ?? 0}</span></div>
+                    <div>TRADES: <span className="text-gray-200">{runner.total_trades ?? 0}</span></div>
                   </div>
 
                   <div className="flex items-center gap-1 mt-1">

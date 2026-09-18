@@ -1,5 +1,6 @@
 import React from "react";
 import { TelemetryPayload } from "../../types/telemetry";
+import { formatNum, formatGbp, formatPct, toNum } from "../../lib/format";
 
 interface Props {
   telemetry: TelemetryPayload | null;
@@ -20,6 +21,7 @@ export function SniperPane({ telemetry, onToggleSniper }: Props) {
   }
 
   const radarItems = Object.values(sniper.radar || {});
+  const profitVal = toNum(sniper.total_sniper_profit_gbp, 0);
 
   return (
     <div className="flex flex-col bg-[#050505] border border-gray-800 font-mono text-xs overflow-hidden h-full">
@@ -38,16 +40,16 @@ export function SniperPane({ telemetry, onToggleSniper }: Props) {
         <div className="grid grid-cols-3 gap-1">
           <div className="border border-gray-800 p-1.5">
             <div className="text-gray-500 text-[10px]">HURDLE_PCT</div>
-            <div className="text-gray-200">{(sniper.impulse_threshold_pct * 100).toFixed(3)}%</div>
+            <div className="text-gray-200">{formatPct(sniper.impulse_threshold_pct, 3)}</div>
           </div>
           <div className="border border-gray-800 p-1.5">
             <div className="text-gray-500 text-[10px]">SUCCESS/TOTAL</div>
-            <div className="text-gray-200">{sniper.successful_snipes}/{sniper.total_snipes} ({sniper.win_rate_pct.toFixed(1)}%)</div>
+            <div className="text-gray-200">{sniper.successful_snipes ?? 0}/{sniper.total_snipes ?? 0} ({formatNum(sniper.win_rate_pct, 1)}%)</div>
           </div>
           <div className="border border-gray-800 p-1.5">
             <div className="text-gray-500 text-[10px]">TOTAL_PNL</div>
-            <div className={sniper.total_sniper_profit_gbp >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-              £{sniper.total_sniper_profit_gbp.toFixed(2)}
+            <div className={profitVal >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+              {formatGbp(sniper.total_sniper_profit_gbp, 2, true)}
             </div>
           </div>
         </div>
@@ -71,15 +73,15 @@ export function SniperPane({ telemetry, onToggleSniper }: Props) {
                   <tr><td colSpan={4} className="text-center p-2 text-gray-600">NO_RADAR_DATA</td></tr>
                 ) : (
                   radarItems.map((r, i) => {
-                    const disloc = r.current_dislocation_pct || 0;
-                    const isHot = r.in_snipe_zone;
+                    const disloc = toNum(r.current_dislocation_pct, 0);
+                    const isHot = Boolean(r.in_snipe_zone);
                     const dislocColor = isHot ? 'text-yellow-400 font-bold' : (Math.abs(disloc) > 0.05 ? 'text-gray-200' : 'text-gray-500');
                     return (
                       <tr key={i} className={`border-b border-gray-800/50 ${isHot ? 'bg-yellow-900/20' : ''}`}>
-                        <td className="text-left p-1 pl-2 font-bold">{r.symbol.replace('/GBP', '')}</td>
-                        <td className="p-1">{r.kraken_price?.toFixed(2) || '-'}</td>
-                        <td className="p-1">{r.revolut_best_ask?.toFixed(2) || '-'}</td>
-                        <td className={`p-1 pr-2 ${dislocColor}`}>{disloc > 0 ? '+' : ''}{disloc.toFixed(3)}%</td>
+                        <td className="text-left p-1 pl-2 font-bold">{String(r.symbol).replace('/GBP', '')}</td>
+                        <td className="p-1">{formatNum(r.kraken_price, 2)}</td>
+                        <td className="p-1">{formatNum(r.revolut_best_ask, 2)}</td>
+                        <td className={`p-1 pr-2 ${dislocColor}`}>{formatPct(r.current_dislocation_pct, 3, true)}</td>
                       </tr>
                     );
                   })

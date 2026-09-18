@@ -1,29 +1,34 @@
 export interface RunnerTelemetry {
   runner_id: string;
   symbol: string;
-  current_price?: number;
-  center_price: number | null;
-  inventory_base: number;
-  inventory_value_gbp?: number;
-  realized_pnl: number;
+  current_price?: number | string | null;
+  center_price: number | string | null;
+  inventory_base: number | string;
+  inventory_value_gbp?: number | string;
+  realized_pnl: number | string;
   total_trades: number;
   active_orders_count: number;
   is_paused: boolean;
-  step_pct?: number;
-  rebalance_threshold_pct?: number;
+  step_pct?: number | string;
+  rebalance_threshold_pct?: number | string;
+  effective_center?: number | string | null;
+  dynamic_step_pct?: number | string | null;
+  rolling_volatility_pct?: number | string | null;
 }
 
 export interface RestingOrder {
   id: string;
+  client_order_id?: string;
   runner_id: string;
   symbol: string;
-  side: "BUY" | "SELL";
-  price: number;
-  qty: number;
-  value_gbp: number;
+  side: "BUY" | "SELL" | string;
+  price: number | string;
+  qty: number | string;
+  value_gbp: number | string;
   created_at: string;
   rung_level: number;
-  distance_pct: number;
+  distance_pct: number | string;
+  is_live?: boolean;
 }
 
 export interface LiveTradeEvent {
@@ -34,26 +39,26 @@ export interface LiveTradeEvent {
   symbol: string;
   side?: "BUY" | "SELL" | string;
   action?: string;
-  price: number;
-  qty: number;
-  value_gbp?: number;
-  fee_gbp?: number;
-  fx_rate?: number;
-  profit?: number;
-  pnl_gbp?: number;
-  pnl_pct?: number;
+  price: number | string;
+  qty: number | string;
+  value_gbp?: number | string;
+  fee_gbp?: number | string;
+  fx_rate?: number | string;
+  profit?: number | string;
+  pnl_gbp?: number | string;
+  pnl_pct?: number | string;
   strategy?: string;
   note?: string;
 }
 
 export interface MarketPriceInfo {
-  price: number | null;
+  price: number | string | null;
   status?: string;
   disclaimer?: string | null;
-  high24h?: number | null;
-  low24h?: number | null;
-  change24h?: number | null;
-  yesterday_close?: number | null;
+  high24h?: number | string | null;
+  low24h?: number | string | null;
+  change24h?: number | string | null;
+  yesterday_close?: number | string | null;
   timestamp?: string | null;
 }
 
@@ -61,14 +66,14 @@ export interface VenueRadarItem {
   symbol: string;
   status?: string;
   disclaimer?: string | null;
-  kraken_price: number | null;
-  revolut_best_bid: number | null;
-  revolut_best_ask: number | null;
-  revolut_spread_gbp: number;
-  revolut_spread_pct: number;
-  buy_opportunity_pct: number;
-  sell_opportunity_pct: number;
-  current_dislocation_pct: number;
+  kraken_price: number | string | null;
+  revolut_best_bid: number | string | null;
+  revolut_best_ask: number | string | null;
+  revolut_spread_gbp: number | string;
+  revolut_spread_pct: number | string;
+  buy_opportunity_pct: number | string;
+  sell_opportunity_pct: number | string;
+  current_dislocation_pct: number | string;
   in_snipe_zone: boolean;
   direction: string;
   lead_advantage_ms: number;
@@ -77,17 +82,17 @@ export interface VenueRadarItem {
 export interface SniperTelemetry {
   enabled: boolean;
   status: string;
-  impulse_threshold_pct: number;
-  snipe_order_size_gbp: number;
-  min_net_edge_pct: number;
-  revolut_taker_fee_pct: number;
-  revolut_maker_fee_pct?: number;
+  impulse_threshold_pct: number | string;
+  snipe_order_size_gbp: number | string;
+  min_net_edge_pct: number | string;
+  revolut_taker_fee_pct: number | string;
+  revolut_maker_fee_pct?: number | string;
   scratch_timeout_ms?: number;
   total_snipes: number;
   successful_snipes: number;
-  win_rate_pct: number;
-  total_sniper_profit_gbp: number;
-  total_taker_fees_paid_gbp: number;
+  win_rate_pct: number | string;
+  total_sniper_profit_gbp: number | string;
+  total_taker_fees_paid_gbp: number | string;
   average_lead_advantage_ms: number;
   radar: Record<string, VenueRadarItem>;
   recent_snipes: any[];
@@ -95,44 +100,44 @@ export interface SniperTelemetry {
 
 export interface CapitalManagement {
   balance_source: string;
-  starting_balance_gbp: number;
-  total_deposited_cash_gbp?: number;
-  settled_cash_gbp: number;
-  cumulative_profit_gbp: number;
-  profit_lock_pct: number;
-  locked_profit_gbp: number;
-  unlocked_profit_gbp: number;
-  active_trading_power_gbp: number;
-  expansion_ratio: number;
+  starting_balance_gbp: number | string;
+  total_deposited_cash_gbp?: number | string;
+  settled_cash_gbp: number | string;
+  cumulative_profit_gbp: number | string;
+  profit_lock_pct: number | string;
+  locked_profit_gbp: number | string;
+  unlocked_profit_gbp: number | string;
+  active_trading_power_gbp: number | string;
+  expansion_ratio: number | string;
   rungs_per_side: number;
-  split_btc_pct: number;
-  split_eth_pct: number;
-  split_sol_pct?: number;
-  unrealized_pnl_gbp?: number;
-  crypto_holdings_value_gbp?: number;
+  split_btc_pct: number | string;
+  split_eth_pct: number | string;
+  split_sol_pct?: number | string;
+  unrealized_pnl_gbp?: number | string;
+  crypto_holdings_value_gbp?: number | string;
   allocations: {
-    trading_power_gbp: number;
-    expansion_ratio: number;
+    trading_power_gbp: number | string;
+    expansion_ratio: number | string;
     runner_btc: {
-      envelope_gbp: number;
-      split_pct: number;
+      envelope_gbp: number | string;
+      split_pct: number | string;
       rungs_per_side: number;
-      order_size_gbp: number;
+      order_size_gbp: number | string;
     };
     runner_eth: {
-      envelope_gbp: number;
-      split_pct: number;
+      envelope_gbp: number | string;
+      split_pct: number | string;
       rungs_per_side: number;
-      order_size_gbp: number;
+      order_size_gbp: number | string;
     };
     runner_sol?: {
-      envelope_gbp: number;
-      split_pct: number;
+      envelope_gbp: number | string;
+      split_pct: number | string;
       rungs_per_side: number;
-      order_size_gbp: number;
+      order_size_gbp: number | string;
     };
     sniper: {
-      order_size_gbp: number;
+      order_size_gbp: number | string;
     };
   };
 }
@@ -182,19 +187,19 @@ export interface TelemetryPayload {
   host_mode?: string;
   circuit_breaker_tripped: boolean;
   circuit_breaker_reason?: string;
-  balances: Record<string, number>;
-  available_balances?: Record<string, number>;
-  reserved_balances?: Record<string, number>;
+  balances: Record<string, number | string>;
+  available_balances?: Record<string, number | string>;
+  reserved_balances?: Record<string, number | string>;
   portfolio?: {
-    total_equity_gbp: number;
-    total_deposited_cash_gbp?: number;
-    initial_budget_gbp: number;
-    total_pnl_gbp: number;
-    total_pnl_pct: number;
-    total_realized_pnl_gbp: number;
-    unrealized_pnl_gbp?: number;
-    crypto_holdings_value_gbp?: number;
-    total_fee_savings_gbp: number;
+    total_equity_gbp: number | string;
+    total_deposited_cash_gbp?: number | string;
+    initial_budget_gbp: number | string;
+    total_pnl_gbp: number | string;
+    total_pnl_pct: number | string;
+    total_realized_pnl_gbp: number | string;
+    unrealized_pnl_gbp?: number | string;
+    crypto_holdings_value_gbp?: number | string;
+    total_fee_savings_gbp: number | string;
   };
   capital_management?: CapitalManagement;
   market_prices?: Record<string, MarketPriceInfo>;
@@ -206,12 +211,11 @@ export interface TelemetryPayload {
   resting_orders_count: number;
   live_trades?: LiveTradeEvent[];
   timestamp?: number;
-  // Extracted from brain telemetry mapping
   brain?: {
-    total_settled_cash: number;
-    sniper_reserve_fiat: number;
-    grid_pool_fiat: number;
-    pair_allocations: Record<string, number>;
+    total_settled_cash: number | string;
+    sniper_reserve_fiat: number | string;
+    grid_pool_fiat: number | string;
+    pair_allocations: Record<string, number | string>;
     status: string;
     decision_summary: string;
   };

@@ -1,5 +1,6 @@
 import React from "react";
 import { TelemetryPayload } from "../../types/telemetry";
+import { formatNum, formatPct, toNum } from "../../lib/format";
 
 interface Props {
   telemetry: TelemetryPayload | null;
@@ -31,17 +32,22 @@ export function OrderBookPane({ telemetry }: Props) {
               <tr><td colSpan={5} className="text-center p-4 text-gray-600 italic">BOOK_EMPTY</td></tr>
             ) : (
               // Sort by price descending
-              [...orders].sort((a, b) => b.price - a.price).map((o) => (
-                <tr key={o.id} className="border-b border-gray-800/30 hover:bg-gray-900/50">
-                  <td className="text-left p-1 pl-2 font-bold text-gray-400">{o.symbol.replace('/GBP', '')}</td>
-                  <td className={`p-1 ${o.side === 'BUY' ? 'text-emerald-500' : 'text-red-500'}`}>{o.side}</td>
-                  <td className="p-1">{o.price.toFixed(2)}</td>
-                  <td className="p-1">{o.qty.toFixed(4)}</td>
-                  <td className="p-1 pr-2 text-gray-500">
-                    {o.distance_pct > 0 ? '+' : ''}{o.distance_pct.toFixed(2)}%
-                  </td>
-                </tr>
-              ))
+              [...orders]
+                .sort((a, b) => toNum(b.price) - toNum(a.price))
+                .map((o) => {
+                  const sideStr = String(o.side).toUpperCase();
+                  return (
+                    <tr key={o.id || o.client_order_id} className="border-b border-gray-800/30 hover:bg-gray-900/50">
+                      <td className="text-left p-1 pl-2 font-bold text-gray-400">{String(o.symbol).replace('/GBP', '')}</td>
+                      <td className={`p-1 ${sideStr === 'BUY' ? 'text-emerald-500' : 'text-red-500'}`}>{sideStr}</td>
+                      <td className="p-1">{formatNum(o.price, 2)}</td>
+                      <td className="p-1">{formatNum(o.qty, 4)}</td>
+                      <td className="p-1 pr-2 text-gray-500">
+                        {formatPct(o.distance_pct, 2, true)}
+                      </td>
+                    </tr>
+                  );
+                })
             )}
           </tbody>
         </table>

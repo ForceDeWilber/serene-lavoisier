@@ -1,6 +1,7 @@
 import React, { useState } from "react";
-import { Plus, Trash2, Zap, Settings } from "lucide-react";
+import { Plus, Trash2, Zap } from "lucide-react";
 import { TelemetryPayload } from "../../types/telemetry";
+import { formatNum, formatGbp, toNum } from "../../lib/format";
 
 interface Props {
   telemetry: TelemetryPayload | null;
@@ -67,37 +68,40 @@ export function AssetManagementPane({ telemetry, onAddPair, onRemovePair, onLiqu
           {activeRunners.length === 0 ? (
             <div className="text-gray-600 italic px-2 py-1">NO_PAIRS_ACTIVE</div>
           ) : (
-            activeRunners.map(runner => (
-              <div key={runner.runner_id} className="border border-gray-800 p-2 flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-200 font-bold">{runner.symbol}</span>
-                  <span className={`px-1 text-[10px] ${runner.is_paused ? 'bg-yellow-900 text-yellow-400' : 'bg-emerald-900/50 text-emerald-400'}`}>
-                    {runner.is_paused ? 'PAUSED' : 'ACTIVE'}
-                  </span>
+            activeRunners.map(runner => {
+              const pnlVal = toNum(runner.realized_pnl, 0);
+              return (
+                <div key={runner.runner_id} className="border border-gray-800 p-2 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-200 font-bold">{runner.symbol}</span>
+                    <span className={`px-1 text-[10px] ${runner.is_paused ? 'bg-yellow-900 text-yellow-400' : 'bg-emerald-900/50 text-emerald-400'}`}>
+                      {runner.is_paused ? 'PAUSED' : 'ACTIVE'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 text-[10px] text-gray-400">
+                    <div>INV: <span className="text-gray-200">{formatNum(runner.inventory_base, 4)}</span></div>
+                    <div>PNL: <span className={pnlVal >= 0 ? 'text-emerald-400' : 'text-red-400'}>{formatGbp(runner.realized_pnl, 2, true)}</span></div>
+                  </div>
+                  <div className="flex gap-1 mt-1">
+                    <button 
+                      onClick={() => onLiquidatePair(runner.runner_id)}
+                      className="flex-1 bg-red-950/30 text-red-400 border border-red-900/50 hover:bg-red-900 hover:text-white flex items-center justify-center py-1 gap-1"
+                      title="Sell all inventory to quote currency instantly"
+                    >
+                      <Zap className="w-3 h-3" />
+                      <span>LIQUIDATE</span>
+                    </button>
+                    <button 
+                      onClick={() => onRemovePair(runner.runner_id)}
+                      className="px-2 bg-gray-900 text-gray-400 border border-gray-800 hover:bg-gray-800 hover:text-white flex items-center justify-center"
+                      title="Remove pair from engine"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
-                <div className="grid grid-cols-2 gap-1 text-[10px] text-gray-400">
-                  <div>INV: <span className="text-gray-200">{runner.inventory_base.toFixed(4)}</span></div>
-                  <div>PNL: <span className={runner.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>£{runner.realized_pnl.toFixed(2)}</span></div>
-                </div>
-                <div className="flex gap-1 mt-1">
-                  <button 
-                    onClick={() => onLiquidatePair(runner.runner_id)}
-                    className="flex-1 bg-red-950/30 text-red-400 border border-red-900/50 hover:bg-red-900 hover:text-white flex items-center justify-center py-1 gap-1"
-                    title="Sell all inventory to quote currency instantly"
-                  >
-                    <Zap className="w-3 h-3" />
-                    <span>LIQUIDATE</span>
-                  </button>
-                  <button 
-                    onClick={() => onRemovePair(runner.runner_id)}
-                    className="px-2 bg-gray-900 text-gray-400 border border-gray-800 hover:bg-gray-800 hover:text-white flex items-center justify-center"
-                    title="Remove pair from engine"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>
