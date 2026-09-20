@@ -35,6 +35,7 @@ pub struct RunnerTelemetry {
     pub total_trades: usize,
     pub active_orders_count: usize,
     pub is_paused: bool,
+    pub market_regime: Option<String>,
 }
 
 pub struct GridRunner {
@@ -51,6 +52,7 @@ pub struct GridRunner {
     telemetry_tx: Option<watch::Sender<RunnerTelemetry>>,
     brain: Option<Arc<crate::brain::EngineBrain>>,
     last_init_attempt: Option<tokio::time::Instant>,
+    alpha_engine: crate::strategy::AlphaMomentumEngine,
 }
 
 impl GridRunner {
@@ -79,6 +81,7 @@ impl GridRunner {
             telemetry_tx: None,
             brain: None,
             last_init_attempt: None,
+            alpha_engine: crate::strategy::AlphaMomentumEngine::new(crate::strategy::AlphaConfig::default()),
         }
     }
 
@@ -106,6 +109,7 @@ impl GridRunner {
                 total_trades: self.strategy.total_trades,
                 active_orders_count: self.strategy.active_orders.len(),
                 is_paused: self.is_paused,
+                market_regime: Some(format!("{:?}", self.alpha_engine.current_regime())),
             };
             let _ = tx.send(snap);
         }
@@ -254,28 +258,38 @@ impl GridRunner {
                     // Record tick in dynamic pricing model to track rolling volatility
                     self.strategy.record_tick(mid_price, tick.timestamp);
 
-                    // 2. Adverse selection check on Kraken tick
-                    let is_toxic_dump = self.risk_engine.record_kraken_tick(&self.symbol, mid_price, tick.timestamp).await;
-                    if is_toxic_dump {
+                    // 2. Alpha Engine: Ingest high-frequency tick to evaluate plunge, stabilization, and surge
+                    let (regime, should_cancel_bids, should_reanchor_bottom) = self.alpha_engine.record_tick(mid_price, tick.timestamp);
+
+                    if should_cancel_bids {
                         let buys_to_cancel: Vec<Order> = self.strategy.active_orders.values()
                             .filter(|o| o.side == OrderSide::Buy)
                             .cloned()
                             .collect();
 
                         warn!(
-                            "[RISK-TRIGGER] [{}] Adverse selection lag filter triggered! Canceling {} resting BUY bids on Revolut X",
+                            "[ALPHA-SHIELD] [{}] Toxic plunge detected! Canceling {} resting BUY bids on Revolut X in < 80ms",
                             self.runner_id, buys_to_cancel.len()
                         );
 
                         for ord in buys_to_cancel {
                             let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
-                            info!("[ORDER-CANCEL] [{}] Canceled resting BUY order {} due to adverse selection plunge", self.runner_id, ord.client_order_id);
+                            info!("[ORDER-CANCEL] [{}] Canceled resting BUY order {} due to toxic plunge", self.runner_id, ord.client_order_id);
                             if let Some(ref db) = self.db {
                                 db.update_order_status(&ord.client_order_id, "CANCELED").await;
                             }
                             self.strategy.active_orders.remove(&ord.id);
                             self.risk_engine.release_order_capital(&ord).await;
                         }
+                    }
+
+                    if should_reanchor_bottom {
+                        info!(
+                            "[ALPHA-REANCHOR] [{}] Market stabilized after plunge at bottom (£{}). Re-anchoring grid center for fresh deployment.",
+                            self.runner_id, mid_price
+                        );
+                        self.strategy.center_price = None;
+                        self.last_init_attempt = None;
                     }
 
                     // 3. Process fills in paper simulator if present
@@ -311,9 +325,10 @@ impl GridRunner {
                         }
                     }
 
-                    // 4. Initialize grid if not yet initialized or if active orders are empty
+                    // 4. Initialize grid if not yet initialized or if active orders are empty (blocked during toxic plunge)
                     let should_init = (self.strategy.center_price.is_none() || self.strategy.active_orders.is_empty())
                         && mid_price > Decimal::ZERO
+                        && regime != crate::strategy::MarketRegime::ToxicPlunge
                         && self.last_init_attempt.map_or(true, |t| t.elapsed() >= tokio::time::Duration::from_secs(10));
 
                     if should_init {
@@ -464,6 +479,7 @@ impl GridRunner {
             total_trades: self.strategy.total_trades,
             active_orders_count: self.strategy.active_orders.len(),
             is_paused: self.is_paused,
+            market_regime: Some(format!("{:?}", self.alpha_engine.current_regime())),
         }
     }
 

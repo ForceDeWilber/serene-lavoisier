@@ -4,6 +4,7 @@ mod manager;
 use dotenvy::dotenv;
 use ipc::IpcServer;
 use manager::RunnerManager;
+use binance_client::BinanceWsMultiplexer;
 use kraken_client::KrakenWsMultiplexer;
 use revolut_client::{LiveRevolutClient, PaperRevolutClient};
 use rust_decimal_macros::dec;
@@ -27,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
 
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info,kraken_client=info,trading_core=info,revolut_client=info,engine_daemon=info".into());
+        .unwrap_or_else(|_| "info,binance_client=info,kraken_client=info,trading_core=info,revolut_client=info,engine_daemon=info".into());
 
     let stdout_layer = tracing_subscriber::fmt::layer()
         .with_ansi(true);
@@ -129,16 +130,29 @@ async fn main() -> anyhow::Result<()> {
 
     let initial_symbols: Vec<trading_core::model::Symbol> = active_pair_configs.iter().map(|p| p.symbol.clone()).collect();
 
-    // 5. Kraken WebSocket v2 Multiplexer (Informational Oracle)
-    let kraken_ws_url = std::env::var("KRAKEN_WS_URL").unwrap_or_else(|_| "wss://ws.kraken.com/v2".into());
-    let (kraken_multiplexer, _primary_rx) = KrakenWsMultiplexer::new(&kraken_ws_url, initial_symbols);
-    let kraken_sub_tx = kraken_multiplexer.subscribe_sender();
-    let tick_broadcast = kraken_multiplexer.tick_sender();
-
-    // Spawn Kraken WS ingest task
-    tokio::spawn(async move {
-        kraken_multiplexer.run().await;
-    });
+    // 5. Market Feed Multiplexer (Configurable: Binance vs Kraken Oracle)
+    let market_feed = std::env::var("MARKET_FEED_SOURCE").unwrap_or_else(|_| "BINANCE".into()).to_uppercase();
+    let (sub_tx, tick_broadcast) = if market_feed == "KRAKEN" {
+        info!("Initializing KRAKEN WebSocket v2 feed as market oracle...");
+        let kraken_ws_url = std::env::var("KRAKEN_WS_URL").unwrap_or_else(|_| "wss://ws.kraken.com/v2".into());
+        let (kraken_multiplexer, _primary_rx) = KrakenWsMultiplexer::new(&kraken_ws_url, initial_symbols);
+        let sub_tx = kraken_multiplexer.subscribe_sender();
+        let tick_broadcast = kraken_multiplexer.tick_sender();
+        tokio::spawn(async move {
+            kraken_multiplexer.run().await;
+        });
+        (sub_tx, tick_broadcast)
+    } else {
+        info!("Initializing BINANCE High-Frequency (277 tr/min) WebSocket feed as market oracle...");
+        let binance_ws_url = std::env::var("BINANCE_WS_URL").unwrap_or_else(|_| "wss://stream.binance.com:9443".into());
+        let (binance_multiplexer, _primary_rx) = BinanceWsMultiplexer::new(&binance_ws_url, initial_symbols);
+        let sub_tx = binance_multiplexer.subscribe_sender();
+        let tick_broadcast = binance_multiplexer.tick_sender();
+        tokio::spawn(async move {
+            binance_multiplexer.run().await;
+        });
+        (sub_tx, tick_broadcast)
+    };
 
     // 6. Dynamic Runner Manager
     let runner_manager = Arc::new(RunnerManager::new(
@@ -146,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
         risk_engine.clone(),
         paper_sim.clone(),
         db_store.clone(),
-        kraken_sub_tx,
+        sub_tx,
         tick_broadcast,
     ));
 

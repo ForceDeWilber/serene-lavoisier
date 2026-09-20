@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/trading-core",
     "crates/kraken-client",
+    "crates/binance-client",
     "crates/revolut-client",
     "crates/engine-daemon",
 ]

@@ -1,5 +1,7 @@
+pub mod alpha;
 pub mod dynamic_pricing;
 pub mod sniper;
+pub use alpha::*;
 pub use dynamic_pricing::*;
 pub use sniper::*;
 

@@ -29,6 +29,8 @@ pub struct RunnerTelemetryDto {
     pub dynamic_step_pct: Option<Decimal>,
     #[serde(default)]
     pub rolling_volatility_pct: Option<Decimal>,
+    #[serde(default)]
+    pub market_regime: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

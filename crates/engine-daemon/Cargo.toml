@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 trading-core = { path = "../trading-core" }
 kraken-client = { path = "../kraken-client" }
+binance-client = { path = "../binance-client" }
 revolut-client = { path = "../revolut-client" }
 tokio = { workspace = true }
 serde = { workspace = true }

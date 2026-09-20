@@ -356,7 +356,7 @@ impl ExecutionClient for LiveRevolutClient {
         self.rate_limiter.acquire().await;
 
         let timestamp = Utc::now().timestamp_millis();
-        let path = format!("/api/1.0/orders/{}", client_order_id);
+        let path = format!("/api/1.0/orders?client_order_id={}", client_order_id);
         let signature = self.signer.sign_payload(timestamp, "DELETE", &path, "");
 
         let url = format!("{}{}", self.base_url, path);

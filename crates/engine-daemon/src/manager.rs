@@ -541,6 +541,7 @@ impl RunnerManager {
                 effective_center: grid_snap.effective_center,
                 dynamic_step_pct: if grid_snap.dynamic_step_pct > Decimal::ZERO { Some(grid_snap.dynamic_step_pct) } else { grid_tune.step_pct },
                 rolling_volatility_pct: if grid_snap.rolling_volatility_pct > Decimal::ZERO { Some(grid_snap.rolling_volatility_pct) } else { None },
+                market_regime: grid_snap.market_regime,
             });
 
             snipers.push(SniperTelemetryDto {
