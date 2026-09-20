@@ -75,12 +75,12 @@ impl DbStore {
 
             if count == 0 {
                 let default_pairs = vec![
-                    ("BTC/USD", "BTC-USD", "BTC", "USD", 500.0, 0.0040, 5, 50.0, 0.012, 1, 50.0, 0.0011),
-                    ("ETH/USD", "ETH-USD", "ETH", "USD", 500.0, 0.0040, 5, 50.0, 0.012, 1, 50.0, 0.0011),
-                    ("SOL/USD", "SOL-USD", "SOL", "USD", 500.0, 0.0060, 5, 50.0, 0.015, 1, 50.0, 0.0011),
-                    ("BTC/GBP", "BTC-GBP", "BTC", "GBP", 500.0, 0.0040, 5, 50.0, 0.012, 1, 50.0, 0.0011),
-                    ("ETH/GBP", "ETH-GBP", "ETH", "GBP", 500.0, 0.0040, 5, 50.0, 0.012, 1, 50.0, 0.0011),
-                    ("SOL/GBP", "SOL-GBP", "SOL", "GBP", 500.0, 0.0060, 5, 50.0, 0.015, 1, 50.0, 0.0011),
+                    ("BTC/USD", "BTC-USD", "BTC", "USD", 500.0, 0.0040, 5, 50.0, 0.012, 0, 50.0, 0.0011),
+                    ("ETH/USD", "ETH-USD", "ETH", "USD", 500.0, 0.0040, 5, 50.0, 0.012, 0, 50.0, 0.0011),
+                    ("SOL/USD", "SOL-USD", "SOL", "USD", 500.0, 0.0060, 5, 50.0, 0.015, 0, 50.0, 0.0011),
+                    ("BTC/GBP", "BTC-GBP", "BTC", "GBP", 500.0, 0.0040, 5, 50.0, 0.012, 0, 50.0, 0.0011),
+                    ("ETH/GBP", "ETH-GBP", "ETH", "GBP", 500.0, 0.0040, 5, 50.0, 0.012, 0, 50.0, 0.0011),
+                    ("SOL/GBP", "SOL-GBP", "SOL", "GBP", 500.0, 0.0060, 5, 50.0, 0.015, 0, 50.0, 0.0011),
                 ];
                 for p in default_pairs {
                     let _ = conn.execute(
@@ -116,26 +116,24 @@ impl DbStore {
         let price = order.price.to_string().parse::<f64>().unwrap_or(0.0);
         let qty = order.qty.to_string().parse::<f64>().unwrap_or(0.0);
         
-        tokio::spawn(async move {
-            let c = conn.lock().await;
-            let res = c.execute(
-                "INSERT INTO order_records (client_order_id, runner_id, symbol, side, price, qty, status) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(client_order_id) DO UPDATE SET status=excluded.status",
-                params![
-                    client_order_id,
-                    runner_id,
-                    symbol,
-                    side,
-                    price,
-                    qty,
-                    status,
-                ],
-            );
-            if let Err(e) = res {
-                error!("Failed to save order {} to DB: {}", client_order_id, e);
-            }
-        });
+        let c = conn.lock().await;
+        let res = c.execute(
+            "INSERT INTO order_records (client_order_id, runner_id, symbol, side, price, qty, status) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(client_order_id) DO UPDATE SET status=excluded.status",
+            params![
+                client_order_id,
+                runner_id,
+                symbol,
+                side,
+                price,
+                qty,
+                status,
+            ],
+        );
+        if let Err(e) = res {
+            error!("Failed to save order {} to DB: {}", client_order_id, e);
+        }
     }
 
     pub async fn update_order_status(&self, client_order_id: &str, status: &str) {
@@ -143,16 +141,14 @@ impl DbStore {
         let cid = client_order_id.to_string();
         let stat = status.to_string();
         
-        tokio::spawn(async move {
-            let c = conn.lock().await;
-            let res = c.execute(
-                "UPDATE order_records SET status=?1 WHERE client_order_id=?2",
-                params![stat, cid],
-            );
-            if let Err(e) = res {
-                error!("Failed to update order {} status to DB: {}", cid, e);
-            }
-        });
+        let c = conn.lock().await;
+        let res = c.execute(
+            "UPDATE order_records SET status=?1 WHERE client_order_id=?2",
+            params![stat, cid],
+        );
+        if let Err(e) = res {
+            error!("Failed to update order {} status to DB: {}", cid, e);
+        }
     }
 
     pub async fn get_active_pair_configs(&self) -> anyhow::Result<Vec<PairConfig>> {

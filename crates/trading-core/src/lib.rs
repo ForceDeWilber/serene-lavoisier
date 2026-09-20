@@ -213,4 +213,63 @@ mod tests {
         assert_eq!(wallet.gbp, dec!(510.0));
         assert_eq!(wallet.btc, dec!(0.01));
     }
+
+    #[test]
+    fn test_grid_buy_budget_clamping() {
+        use rust_decimal::Decimal;
+        let config = GridConfig {
+            runner_id: "test_budget_runner".into(),
+            symbol: Symbol::btc_gbp(),
+            step_pct: dec!(0.005),
+            rungs_per_side: 5,
+            order_size_gbp: dec!(10.0), // 5 rungs * £10 = £50 needed
+            rebalance_threshold_pct: dec!(0.015),
+            dynamic_pricing: DynamicPricingConfig::default(),
+            mode: None,
+            cost_basis: None,
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+        let center = dec!(50000.0);
+
+        // Case 1: £15.00 available fiat -> dynamically scales 5 rungs to £3.00 each
+        let orders = strategy.initialize_grid(center, Some(dec!(15.0)), Some(dec!(0.0)));
+        let buys: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Buy).collect();
+        let total_buy_fiat: Decimal = buys.iter().map(|o| o.price * o.qty).sum();
+        assert!(total_buy_fiat <= dec!(15.00), "Total buy fiat £{} exceeded budget £15.00", total_buy_fiat);
+        assert_eq!(buys.len(), 5);
+
+        // Case 2: Only £3.50 available fiat -> min_clip is £1.00, so at most 3 rungs can be placed (£3.00), not 5!
+        let orders_tight = strategy.initialize_grid(center, Some(dec!(3.50)), Some(dec!(0.0)));
+        let buys_tight: Vec<&Order> = orders_tight.iter().filter(|o| o.side == OrderSide::Buy).collect();
+        let total_tight_fiat: Decimal = buys_tight.iter().map(|o| o.price * o.qty).sum();
+        assert!(total_tight_fiat <= dec!(3.50), "Total buy fiat £{} exceeded budget £3.50", total_tight_fiat);
+        assert_eq!(buys_tight.len(), 3);
+    }
+
+    #[test]
+    fn test_brain_multi_pair_quote_partitioning() {
+        use crate::brain::{EngineBrain, BrainConfig};
+        use rust_decimal::Decimal;
+        let brain = EngineBrain::new(BrainConfig::default());
+        let pair_btc = Symbol::btc_gbp();
+        let pair_eth = Symbol::eth_gbp();
+        let pair_sol = Symbol::sol_gbp();
+
+        brain.register_active_pair(pair_btc.clone());
+        brain.register_active_pair(pair_eth.clone());
+        brain.register_active_pair(pair_sol.clone());
+
+        let gbp_pairs = brain.get_active_pairs_for_quote("GBP");
+        assert_eq!(gbp_pairs.len(), 3);
+
+        // Partition £30 total fiat across 3 pairs
+        let quote_capital = dec!(30.0);
+        let per_pair_capital = quote_capital / Decimal::from(gbp_pairs.len() as u32);
+        assert_eq!(per_pair_capital, dec!(10.0));
+
+        brain.remove_active_pair(&pair_sol);
+        let gbp_pairs_after = brain.get_active_pairs_for_quote("GBP");
+        assert_eq!(gbp_pairs_after.len(), 2);
+    }
 }
+

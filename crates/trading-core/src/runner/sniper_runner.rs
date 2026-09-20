@@ -4,6 +4,7 @@ use crate::risk::CentralRiskEngine;
 use crate::strategy::{LeadLagSniperStrategy, SniperConfig};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
@@ -49,7 +50,7 @@ pub struct SniperRunner {
     risk_engine: Arc<CentralRiskEngine>,
     tick_rx: broadcast::Receiver<MarketTick>,
     tuning_rx: watch::Receiver<SniperTuningUpdate>,
-    in_flight: bool,
+    in_flight: Arc<AtomicBool>,
     telemetry_tx: Option<watch::Sender<SniperTelemetry>>,
     cached_state: Arc<RwLock<CachedMarketState>>,
     brain: Option<Arc<crate::brain::EngineBrain>>,
@@ -73,7 +74,7 @@ impl SniperRunner {
             risk_engine,
             tick_rx,
             tuning_rx,
-            in_flight: false,
+            in_flight: Arc::new(AtomicBool::new(false)),
             telemetry_tx: None,
             cached_state: Arc::new(RwLock::new(CachedMarketState::default())),
             brain: None,
@@ -133,7 +134,8 @@ impl SniperRunner {
                 let raw_quote = client_poll.get_balance(&sym_poll.quote).await.unwrap_or(Decimal::ZERO);
                 let free_quote = if let Some(ref b) = brain_clone {
                     b.update_cash(&sym_poll.quote, raw_quote);
-                    b.get_sniper_allocation(raw_quote, &[sym_poll.clone()])
+                    let active_pairs = b.get_active_pairs_for_quote(&sym_poll.quote);
+                    b.get_sniper_allocation(raw_quote, &active_pairs)
                 } else {
                     raw_quote
                 };
@@ -178,7 +180,7 @@ impl SniperRunner {
         loop {
             tokio::select! {
                 Ok(tick) = self.tick_rx.recv() => {
-                    if tick.symbol != self.symbol || !self.strategy.enabled || self.in_flight {
+                    if tick.symbol != self.symbol || !self.strategy.enabled || self.in_flight.load(Ordering::SeqCst) {
                         continue;
                     }
 
@@ -207,7 +209,8 @@ impl SniperRunner {
                                 Some((bid, ask)) => {
                                     let brain_cash = if let Some(ref b) = self.brain {
                                         let c = b.get_cash(&self.symbol.quote);
-                                        b.get_sniper_allocation(c, &[self.symbol.clone()]).min(state.free_quote)
+                                        let active_pairs = b.get_active_pairs_for_quote(&self.symbol.quote);
+                                        b.get_sniper_allocation(c, &active_pairs).min(state.free_quote)
                                     } else {
                                         state.free_quote
                                     };
@@ -225,7 +228,7 @@ impl SniperRunner {
                     }
 
                     if let Some(opp) = self.strategy.evaluate_dislocation(kraken_mid, rev_bid, rev_ask, free_quote) {
-                        self.in_flight = true;
+                        self.in_flight.store(true, Ordering::SeqCst);
                         info!(
                             "[SNIPER-OPPORTUNITY] [{}] Dislocation on {}: Kraken @ £{} vs Revolut Ask @ £{} (gross: +{}%, est net: £{})",
                             self.runner_id, self.symbol, kraken_mid, rev_ask, opp.gross_edge_pct, opp.estimated_profit_gbp
@@ -290,6 +293,7 @@ impl SniperRunner {
                                         let c_clone = client_clone.clone();
                                         let r_tag = runner_tag.clone();
                                         let s_scratch = sym_scratch.clone();
+                                        let in_flight_watchdog = self.in_flight.clone();
                                         tokio::spawn(async move {
                                             tokio::time::sleep(tokio::time::Duration::from_millis(timeout_ms)).await;
                                             if let Ok(active) = c_clone.get_active_orders().await {
@@ -307,11 +311,25 @@ impl SniperRunner {
                                                                 opp_qty,
                                                             );
                                                             info!("[SNIPER-SCRATCH-DISPATCH] [{}] Submitting market liquidation sell for {} {} @ £{} ({})", r_tag, opp_qty, s_scratch, bbo_bid, scratch_order.client_order_id);
-                                                            let _ = c_clone.submit_taker_order(&scratch_order).await;
+                                                            match c_clone.submit_taker_order(&scratch_order).await {
+                                                                Ok(filled_scratch) => {
+                                                                    let gross_scratch_pnl = (filled_scratch.price - entry_p) * opp_qty;
+                                                                    let fees = (entry_p * opp_qty * dec!(0.0009)) + (filled_scratch.price * opp_qty * dec!(0.0009));
+                                                                    let net_pnl = gross_scratch_pnl - fees;
+                                                                    warn!(
+                                                                        "[SNIPER-SCRATCH-FILLED] [{}] Liquidated unhedged position @ £{}. Net Scratch PnL: £{} (Fees: £{})",
+                                                                        r_tag, filled_scratch.price, net_pnl, fees
+                                                                    );
+                                                                }
+                                                                Err(scratch_err) => {
+                                                                    error!("[SNIPER-SCRATCH-FAILED] [{}] Market liquidation taker order failed: {}. Unhedged inventory stranded!", r_tag, scratch_err);
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
+                                            in_flight_watchdog.store(false, Ordering::SeqCst);
                                         });
 
                                         let taker_fee = (opp.entry_price * opp.qty * dec!(0.0009)).round_dp(2);
@@ -340,6 +358,7 @@ impl SniperRunner {
                                                             let c_clone2 = client_clone.clone();
                                                             let r_tag2 = self.runner_id.clone();
                                                             let sym2 = self.symbol.clone();
+                                                            let in_flight_watchdog2 = self.in_flight.clone();
                                                             tokio::spawn(async move {
                                                                 tokio::time::sleep(tokio::time::Duration::from_millis(timeout_ms)).await;
                                                                 if let Ok(active) = c_clone2.get_active_orders().await {
@@ -353,6 +372,7 @@ impl SniperRunner {
                                                                         }
                                                                     }
                                                                 }
+                                                                in_flight_watchdog2.store(false, Ordering::SeqCst);
                                                             });
                                                         }
                                                         Err(_) => {
@@ -369,6 +389,7 @@ impl SniperRunner {
                                                                 Ok(filled) => info!("[SNIPER-EXIT-FILLED] [{}] Sold {} {} @ £{} (Instant Taker Exit)", self.runner_id, filled.qty, self.symbol, filled.price),
                                                                 Err(err) => error!("[SNIPER-EXIT-FAILED] [{}] Immediate taker exit failed: {}", self.runner_id, err),
                                                             }
+                                                            self.in_flight.store(false, Ordering::SeqCst);
                                                         }
                                                     }
                                                 } else {
@@ -382,13 +403,16 @@ impl SniperRunner {
                                                         opp_qty,
                                                     );
                                                     let _ = client_clone.submit_post_only_order(&safe_order).await;
+                                                    self.in_flight.store(false, Ordering::SeqCst);
                                                 }
                                             }
                                             Ok((_, _)) => {
                                                 error!("[SNIPER-FALLBACK-FAIL] [{}] Best bid is non-positive, cannot execute fallback", self.runner_id);
+                                                self.in_flight.store(false, Ordering::SeqCst);
                                             }
                                             Err(bbo_err) => {
                                                 error!("[SNIPER-FALLBACK-FAIL] [{}] Could not fetch BBO for fallback: {}", self.runner_id, bbo_err);
+                                                self.in_flight.store(false, Ordering::SeqCst);
                                             }
                                         }
                                     }
@@ -396,6 +420,7 @@ impl SniperRunner {
                             }
                             Err(e) => {
                                 warn!("[ORDER-REJECT] [{}] Taker snipe order rejected or missed window: {}", self.runner_id, e);
+                                self.in_flight.store(false, Ordering::SeqCst);
                                 if e.contains("Not enough funds") || e.contains("insufficient") || e.contains("422") {
                                     warn!("[SNIPER-FUNDS] Insufficient {} funds on venue: zeroing cached free_quote", self.symbol.quote);
                                     if let Some(ref b) = self.brain {
@@ -407,8 +432,6 @@ impl SniperRunner {
                                 }
                             }
                         }
-
-                        self.in_flight = false;
                     }
                 }
 

@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 use tracing::{error, info};
-use trading_core::execution::ExecutionClient;
+use trading_core::execution::{ExecutionClient, HistoricalOrder};
 use trading_core::model::{Order, OrderSide, OrderStatus, OrderType, Symbol};
 use trading_core::simulator::PaperExecutionSimulator;
 use uuid::Uuid;
@@ -56,6 +56,7 @@ pub struct LiveRevolutClient {
     rate_limiter: TokenBucketRateLimiter,
     cached_balances: RwLock<Option<(Instant, CachedBalanceSheet)>>,
     cached_active_orders: RwLock<Option<(Instant, Vec<Order>)>>,
+    cached_historical_orders: RwLock<Option<(Instant, Vec<HistoricalOrder>)>>,
     cached_bbo: RwLock<HashMap<String, (Instant, (Decimal, Decimal))>>,
 }
 
@@ -81,7 +82,8 @@ impl LiveRevolutClient {
             .build()
             .map_err(|e| e.to_string())?;
 
-        let rate_limiter = TokenBucketRateLimiter::new(10.0, 540.0);
+        // Capacity 5.0 bursts with 8.0 tokens/sec refill to comfortably stay beneath Revolut X limits
+        let rate_limiter = TokenBucketRateLimiter::new(5.0, 480.0);
 
         Ok(Self {
             base_url: base_url.into(),
@@ -90,6 +92,7 @@ impl LiveRevolutClient {
             rate_limiter,
             cached_balances: RwLock::new(None),
             cached_active_orders: RwLock::new(None),
+            cached_historical_orders: RwLock::new(None),
             cached_bbo: RwLock::new(HashMap::new()),
         })
     }
@@ -137,8 +140,10 @@ impl LiveRevolutClient {
             .map_err(|e| format!("HTTP order POST error: {}", e))?;
 
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            tracing::warn!("[RATE-LIMIT] Revolut X 429 on send_order, backing off 600ms and retrying once...");
-            tokio::time::sleep(Duration::from_millis(600)).await;
+            let jitter_ms = 100 + (Utc::now().timestamp_millis() % 250) as u64;
+            let backoff_ms = 400 + jitter_ms;
+            tracing::warn!("[RATE-LIMIT] Revolut X 429 on send_order, backing off {backoff_ms}ms and retrying once...");
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             self.rate_limiter.acquire().await;
             let ts2 = Utc::now().timestamp_millis();
             let sig2 = self.signer.sign_payload(ts2, "POST", path, &body_str);
@@ -163,9 +168,10 @@ impl LiveRevolutClient {
             return Err(format!("Revolut X rejected order [{status}]: {err_text}"));
         }
 
-        // Invalidate cached balances and active orders immediately
+        // Invalidate cached balances, active orders, and historical orders immediately
         *self.cached_balances.write().await = None;
         *self.cached_active_orders.write().await = None;
+        *self.cached_historical_orders.write().await = None;
 
         info!(
             "[ORDER-DISPATCH] [VENUE-ACK] Revolut X placed order: {} {} {} @ £{} ({})",
@@ -242,6 +248,98 @@ impl LiveRevolutClient {
         *self.cached_balances.write().await = Some((Instant::now(), sheet.clone()));
         Ok(sheet)
     }
+
+    async fn fetch_historical_orders(&self, limit: usize) -> Result<Vec<HistoricalOrder>, String> {
+        {
+            let cache = self.cached_historical_orders.read().await;
+            if let Some((cached_at, ref orders)) = *cache {
+                if cached_at.elapsed() < Duration::from_millis(1500) {
+                    return Ok(orders.clone());
+                }
+            }
+        }
+
+        self.rate_limiter.acquire().await;
+
+        let timestamp = Utc::now().timestamp_millis();
+        let query_limit = limit.max(1).min(100);
+        let path = format!("/api/1.0/orders/historical?limit={}", query_limit);
+        let signature = self.signer.sign_payload(timestamp, "GET", &path, "");
+
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-Revx-API-Key", self.signer.api_key())
+            .header("X-Revx-Timestamp", timestamp.to_string())
+            .header("X-Revx-Signature", signature)
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("HTTP historical orders request error: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Revolut X historical orders fetch failed [HTTP {}]", resp.status()));
+        }
+
+        #[derive(Deserialize, Debug)]
+        struct HistoricalOrderEntry {
+            pub id: Option<String>,
+            pub client_order_id: Option<String>,
+            pub symbol: Option<String>,
+            pub side: Option<String>,
+            pub status: Option<String>,
+            pub price: Option<String>,
+            pub quantity: Option<String>,
+            pub filled_quantity: Option<String>,
+            pub average_fill_price: Option<String>,
+        }
+
+        let body_bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        let parsed_items: Vec<HistoricalOrderEntry> = if let Ok(wrapped) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            if let Some(arr) = wrapped.get("data").and_then(|d| d.as_array()) {
+                serde_json::from_value(serde_json::Value::Array(arr.clone())).unwrap_or_default()
+            } else if wrapped.is_array() {
+                serde_json::from_value(wrapped).unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let mut orders = Vec::new();
+        for item in parsed_items {
+            let id = item.id.unwrap_or_default();
+            let cid = item.client_order_id.unwrap_or_else(|| id.clone());
+            let sym = item.symbol.unwrap_or_default();
+            let side = if item.side.as_deref().unwrap_or("").eq_ignore_ascii_case("SELL") {
+                OrderSide::Sell
+            } else {
+                OrderSide::Buy
+            };
+            let status = item.status.unwrap_or_else(|| "UNKNOWN".to_string()).to_lowercase();
+            let price = item.price.and_then(|p| Decimal::from_str(&p).ok()).unwrap_or(Decimal::ZERO);
+            let quantity = item.quantity.and_then(|q| Decimal::from_str(&q).ok()).unwrap_or(Decimal::ZERO);
+            let filled_quantity = item.filled_quantity.and_then(|q| Decimal::from_str(&q).ok()).unwrap_or(Decimal::ZERO);
+            let average_fill_price = item.average_fill_price.and_then(|p| Decimal::from_str(&p).ok());
+
+            orders.push(HistoricalOrder {
+                id,
+                client_order_id: cid,
+                symbol: sym,
+                side,
+                status,
+                price,
+                quantity,
+                filled_quantity,
+                average_fill_price,
+            });
+        }
+
+        *self.cached_historical_orders.write().await = Some((Instant::now(), orders.clone()));
+        Ok(orders)
+    }
 }
 
 #[async_trait]
@@ -280,9 +378,10 @@ impl ExecutionClient for LiveRevolutClient {
             return Err(format!("Revolut X cancel failed [{status}]: {err_text}"));
         }
 
-        // Invalidate cached active orders and balances immediately
+        // Invalidate cached active orders, balances, and historical orders immediately
         *self.cached_active_orders.write().await = None;
         *self.cached_balances.write().await = None;
+        *self.cached_historical_orders.write().await = None;
 
         info!("[ORDER-CANCEL] [VENUE-ACK] Canceled order on Revolut X: {}", client_order_id);
         Ok(())
@@ -314,9 +413,10 @@ impl ExecutionClient for LiveRevolutClient {
             return Err(format!("Revolut X bulk cancel failed [{status}]: {err_text}"));
         }
 
-        // Invalidate cached active orders and balances immediately
+        // Invalidate cached active orders, balances, and historical orders immediately
         *self.cached_active_orders.write().await = None;
         *self.cached_balances.write().await = None;
+        *self.cached_historical_orders.write().await = None;
 
         info!("[ORDER-CANCEL] [VENUE-ACK] All active orders canceled on Revolut X");
         Ok(1)
@@ -448,6 +548,10 @@ impl ExecutionClient for LiveRevolutClient {
 
         *self.cached_active_orders.write().await = Some((Instant::now(), orders.clone()));
         Ok(orders)
+    }
+
+    async fn get_historical_orders(&self, limit: usize) -> Result<Vec<HistoricalOrder>, String> {
+        self.fetch_historical_orders(limit).await
     }
 
     async fn get_bbo(&self, symbol: &Symbol) -> Result<(Decimal, Decimal), String> {
@@ -593,6 +697,31 @@ impl ExecutionClient for PaperRevolutClient {
     async fn get_active_orders(&self) -> Result<Vec<Order>, String> {
         let orders = self.simulator.get_resting_orders().await;
         Ok(orders)
+    }
+
+    async fn get_historical_orders(&self, limit: usize) -> Result<Vec<HistoricalOrder>, String> {
+        let orders = self.simulator.get_resting_orders().await;
+        let mut hist = Vec::new();
+        for o in orders.into_iter().take(limit) {
+            hist.push(HistoricalOrder {
+                id: o.id.to_string(),
+                client_order_id: o.client_order_id,
+                symbol: o.symbol.as_dash(),
+                side: o.side,
+                status: if o.status == OrderStatus::Filled {
+                    "filled".to_string()
+                } else if o.status == OrderStatus::Canceled {
+                    "cancelled".to_string()
+                } else {
+                    "open".to_string()
+                },
+                price: o.price,
+                quantity: o.qty,
+                filled_quantity: o.filled_qty,
+                average_fill_price: Some(o.price),
+            });
+        }
+        Ok(hist)
     }
 
     async fn get_bbo(&self, symbol: &Symbol) -> Result<(Decimal, Decimal), String> {

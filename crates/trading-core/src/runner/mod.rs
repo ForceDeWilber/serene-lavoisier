@@ -9,7 +9,7 @@ use crate::strategy::{GeometricGridStrategy, GridConfig};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct RunnerTuningUpdate {
@@ -133,46 +133,76 @@ impl GridRunner {
         loop {
             tokio::select! {
                 _ = poll_interval.tick() => {
-                    // 1. Live Fill Polling (Only if not using simulator)
+                    // 1. Live Fill Polling with Venue Status Verification (Only if not using simulator)
                     if self.simulator.is_none() && !self.is_paused && !self.strategy.active_orders.is_empty() {
                         if let Ok(active) = self.execution_client.get_active_orders().await {
                             let active_ids: std::collections::HashSet<_> = active.into_iter().map(|o| o.client_order_id).collect();
-                            let mut fills_to_process = Vec::new();
-                            let mut filled_ids = Vec::new();
+                            let mut missing_orders = Vec::new();
 
                             for ord in self.strategy.active_orders.values() {
                                 if !active_ids.contains(&ord.client_order_id) {
-                                    let fill = crate::model::Fill {
-                                        order_id: ord.id,
-                                        client_order_id: ord.client_order_id.clone(),
-                                        runner_id: ord.runner_id.clone(),
-                                        symbol: ord.symbol.clone(),
-                                        side: ord.side,
-                                        price: ord.price,
-                                        qty: ord.qty,
-                                        fee: Decimal::ZERO,
-                                        timestamp: chrono::Utc::now(),
-                                    };
-                                    fills_to_process.push(fill);
-                                    filled_ids.push(ord.id);
+                                    missing_orders.push(ord.clone());
                                 }
                             }
 
-                            for id in filled_ids {
-                                self.strategy.remove_active_order(&id);
-                            }
+                            if !missing_orders.is_empty() {
+                                let historical = self.execution_client.get_historical_orders(50).await.unwrap_or_default();
+                                let mut fills_to_process = Vec::new();
+                                let mut to_remove = Vec::new();
 
-                            for fill in fills_to_process {
-                                info!("[ORDER-FILL] [{}] Live venue fill confirmed: Order {} ({} {} @ £{})", self.runner_id, fill.client_order_id, fill.side, fill.qty, fill.price);
-                                self.risk_engine.settle_fill(&fill).await;
-                                if let Some(ref db) = self.db {
-                                    db.update_order_status(&fill.client_order_id, "FILLED").await;
+                                for ord in missing_orders {
+                                    let hist_match = historical.iter().find(|h| h.client_order_id == ord.client_order_id);
+                                    if let Some(h) = hist_match {
+                                        let status = h.status.to_lowercase();
+                                        if status == "filled" || (h.filled_quantity > Decimal::ZERO && status != "cancelled" && status != "expired" && status != "rejected") {
+                                            let fill_qty = if h.filled_quantity > Decimal::ZERO { h.filled_quantity } else { ord.qty };
+                                            let fill_price = h.average_fill_price.unwrap_or(ord.price);
+                                            let fill = crate::model::Fill {
+                                                order_id: ord.id,
+                                                client_order_id: ord.client_order_id.clone(),
+                                                runner_id: ord.runner_id.clone(),
+                                                symbol: ord.symbol.clone(),
+                                                side: ord.side,
+                                                price: fill_price,
+                                                qty: fill_qty,
+                                                fee: Decimal::ZERO,
+                                                timestamp: chrono::Utc::now(),
+                                            };
+                                            fills_to_process.push(fill);
+                                            to_remove.push(ord.id);
+                                        } else if status == "cancelled" || status == "canceled" || status == "expired" || status == "rejected" {
+                                            warn!(
+                                                "[ORDER-CANCELED-ACK] [{}] Order {} confirmed {} on Revolut X (no fill). Releasing capital.",
+                                                self.runner_id, ord.client_order_id, status
+                                            );
+                                            self.risk_engine.release_order_capital(&ord).await;
+                                            if let Some(ref db) = self.db {
+                                                db.update_order_status(&ord.client_order_id, "CANCELED").await;
+                                            }
+                                            to_remove.push(ord.id);
+                                        } else {
+                                            debug!("[ORDER-STATUS-PENDING] [{}] Order {} reported status: {}", self.runner_id, ord.client_order_id, status);
+                                        }
+                                    } else {
+                                        debug!("[ORDER-STATUS-AWAIT] [{}] Missing order {} not yet in historical orders. Awaiting confirmation.", self.runner_id, ord.client_order_id);
+                                    }
                                 }
-                                if let Some(counter_order) = self.strategy.on_fill(&fill) {
-                                    info!(
-                                        "[COUNTER-ORDER] [{}] Generated counter order {} for fill {}: {} {} @ £{}",
-                                        self.runner_id, counter_order.client_order_id, fill.client_order_id, counter_order.side, counter_order.qty, counter_order.price
-                                    );
+
+                                for id in to_remove {
+                                    self.strategy.remove_active_order(&id);
+                                }
+
+                                for fill in fills_to_process {
+                                    info!("[ORDER-FILL] [{}] Live venue fill confirmed: Order {} ({} {} @ £{})", self.runner_id, fill.client_order_id, fill.side, fill.qty, fill.price);
+                                    self.risk_engine.settle_fill(&fill).await;
+                                    if let Some(ref db) = self.db {
+                                        db.update_order_status(&fill.client_order_id, "FILLED").await;
+                                    }
+                                    if let Some(counter_order) = self.strategy.on_fill(&fill) {
+                                        info!(
+                                            "[COUNTER-ORDER] [{}] Generated counter order {} for fill {}: {} {} @ £{}",
+                                            self.runner_id, counter_order.client_order_id, fill.client_order_id, counter_order.side, counter_order.qty, counter_order.price
+                                        );
                                     match self.risk_engine.validate_order(&counter_order).await {
                                         Ok(()) => {
                                             match self.submit_and_save(&counter_order).await {
@@ -205,7 +235,8 @@ impl GridRunner {
                             }
                         }
                     }
-                    self.publish_telemetry();
+                }
+                self.publish_telemetry();
                 }
                 
                 // Listen for market ticks multiplexed from Kraken WS
@@ -290,11 +321,12 @@ impl GridRunner {
                         let balances = self.execution_client.get_available_balances().await.ok();
                         let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
                         let free_fiat = if let Some(ref brain) = self.brain {
-                            let (sniper_res, _, allocations) = brain.partition_capital(total_quote, &[self.symbol.clone()]);
+                            let active_pairs = brain.get_active_pairs_for_quote(&self.symbol.quote);
+                            let (sniper_res, _, allocations) = brain.partition_capital(total_quote, &active_pairs);
                             let pair_budget = allocations.get(&self.symbol.as_slash()).copied().unwrap_or(Decimal::ZERO);
                             info!(
-                                "[BRAIN-PARTITION] [{}] Cash {} {:.2} partitioned: {:.2} to Sniper reserve, {:.2} to {}",
-                                self.runner_id, self.symbol.quote, total_quote, sniper_res, pair_budget, self.symbol
+                                "[BRAIN-PARTITION] [{}] Cash {} {:.2} partitioned across {:?}: {:.2} to Sniper reserve, {:.2} to {}",
+                                self.runner_id, self.symbol.quote, total_quote, active_pairs.iter().map(|s| s.as_slash()).collect::<Vec<_>>(), sniper_res, pair_budget, self.symbol
                             );
                             self.risk_engine.register_envelope(&self.runner_id, &self.symbol.quote, pair_budget).await;
                             Some(pair_budget)
@@ -344,7 +376,8 @@ impl GridRunner {
                         let balances = self.execution_client.get_available_balances().await.ok();
                         let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
                         let free_fiat = if let Some(ref brain) = self.brain {
-                            let (_, _, allocations) = brain.partition_capital(total_quote, &[self.symbol.clone()]);
+                            let active_pairs = brain.get_active_pairs_for_quote(&self.symbol.quote);
+                            let (_, _, allocations) = brain.partition_capital(total_quote, &active_pairs);
                             let pair_budget = allocations.get(&self.symbol.as_slash()).copied().unwrap_or(Decimal::ZERO);
                             self.risk_engine.register_envelope(&self.runner_id, &self.symbol.quote, pair_budget).await;
                             Some(pair_budget)
@@ -378,8 +411,10 @@ impl GridRunner {
                     let update = self.tuning_rx.borrow().clone();
                     self.is_paused = update.paused;
                     if self.is_paused && !self.strategy.active_orders.is_empty() {
-                        info!("[RUNNER-PAUSE] [{}] Runner paused/halted. Clearing {} active orders locally and releasing risk capital", self.runner_id, self.strategy.active_orders.len());
+                        info!("[RUNNER-PAUSE] [{}] Runner paused/halted. Canceling {} active orders on venue and releasing risk capital", self.runner_id, self.strategy.active_orders.len());
                         for (_, ord) in self.strategy.active_orders.drain() {
+                            let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
+                            info!("[ORDER-CANCEL] [{}] Canceled resting order {} due to runner pause", self.runner_id, ord.client_order_id);
                             if let Some(ref db) = self.db {
                                 db.update_order_status(&ord.client_order_id, "CANCELED").await;
                             }

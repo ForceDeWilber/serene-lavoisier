@@ -105,15 +105,50 @@ impl GeometricGridStrategy {
         // Generate BUY rungs below effective reservation center price (unless winding down)
         if order_clip >= dec!(1.00) && self.config.mode.as_deref() != Some("WIND_DOWN") {
             let mut current_buy_multiplier = one;
+            let mut allocated_buy_fiat = Decimal::ZERO;
+            let min_clip = dec!(1.00);
+
             for _ in 1..=self.config.rungs_per_side {
+                let remaining_fiat = if let Some(fiat) = free_fiat {
+                    fiat - allocated_buy_fiat
+                } else {
+                    Decimal::MAX
+                };
+
+                if remaining_fiat < min_clip {
+                    break;
+                }
+
                 current_buy_multiplier *= one - dynamic_step;
                 let rung_price = (effective_center * current_buy_multiplier).round_dp(2);
                 if rung_price <= Decimal::ZERO {
                     continue;
                 }
-                let qty = (order_clip / rung_price).round_dp(6);
+
+                let rung_clip = order_clip.min(remaining_fiat);
+                if rung_clip < min_clip {
+                    break;
+                }
+
+                let mut qty = (rung_clip / rung_price).round_dp(6);
                 if qty <= Decimal::ZERO {
                     continue;
+                }
+
+                // If rounding qty to 6 dp caused notional to drop below min_clip, try bumping by smallest step if fiat allows
+                let step = dec!(0.000001);
+                while (qty * rung_price).round_dp(2) < min_clip && (qty + step) * rung_price <= remaining_fiat {
+                    qty += step;
+                }
+
+                // If rounding qty to 6 dp caused notional to exceed remaining fiat, decrement to stay within budget
+                while qty * rung_price > remaining_fiat && qty > step {
+                    qty -= step;
+                }
+
+                let actual_notional = (rung_price * qty).round_dp(2);
+                if actual_notional < min_clip {
+                    break;
                 }
 
                 let order = Order::new_limit_post_only(
@@ -124,6 +159,7 @@ impl GeometricGridStrategy {
                     qty,
                 );
                 new_orders.push(order);
+                allocated_buy_fiat += actual_notional;
             }
         }
 

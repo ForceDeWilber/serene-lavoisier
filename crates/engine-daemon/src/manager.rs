@@ -80,11 +80,21 @@ impl RunnerManager {
                 curr_sniper.order_size_gbp = Some(config.sniper_order_size_fiat);
                 let _ = handle.sniper_tune_tx.send(curr_sniper);
 
+                if config.is_active {
+                    self.brain.register_active_pair(config.symbol.clone());
+                } else {
+                    self.brain.remove_active_pair(&config.symbol);
+                }
+
                 if let Some(ref db) = self.db_store {
                     let _ = db.upsert_pair_config(&config).await;
                 }
                 return Ok(());
             }
+        }
+
+        if config.is_active {
+            self.brain.register_active_pair(config.symbol.clone());
         }
 
         info!("Spawning dynamic execution runners for pair: {}", sym_slash);
@@ -249,7 +259,13 @@ impl RunnerManager {
     ) -> bool {
         let map = self.pairs.read().await;
         for handle in map.values() {
-            if handle.grid_runner_id == runner_id {
+            if handle.grid_runner_id == runner_id
+                || handle.grid_runner_id.starts_with(runner_id)
+                || runner_id.starts_with(&handle.grid_runner_id)
+                || handle.config.symbol.as_slash() == runner_id
+                || handle.config.symbol.as_dash() == runner_id
+                || runner_id.eq_ignore_ascii_case(&handle.config.symbol.as_slash())
+            {
                 let mut curr = handle.grid_tune_tx.borrow().clone();
                 if let Some(p) = paused {
                     curr.paused = p;
@@ -279,7 +295,13 @@ impl RunnerManager {
     pub async fn set_runner_mode(&self, runner_id: &str, mode: &str) -> bool {
         let map = self.pairs.read().await;
         for handle in map.values() {
-            if handle.grid_runner_id == runner_id {
+            if handle.grid_runner_id == runner_id
+                || handle.grid_runner_id.starts_with(runner_id)
+                || runner_id.starts_with(&handle.grid_runner_id)
+                || handle.config.symbol.as_slash() == runner_id
+                || handle.config.symbol.as_dash() == runner_id
+                || runner_id.eq_ignore_ascii_case(&handle.config.symbol.as_slash())
+            {
                 let mut curr = handle.grid_tune_tx.borrow().clone();
                 curr.mode = Some(mode.to_string());
                 let _ = handle.grid_tune_tx.send(curr);
@@ -321,6 +343,7 @@ impl RunnerManager {
                 let _ = db.delete_pair_config(&sym).await;
             }
             if let Some(symbol_obj) = target_symbol_obj {
+                self.brain.remove_active_pair(&symbol_obj);
                 if let Ok(active_orders) = self.execution_client.get_active_orders().await {
                     for ord in active_orders {
                         if ord.symbol == symbol_obj {

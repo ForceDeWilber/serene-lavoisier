@@ -24,8 +24,8 @@ impl Default for BrainConfig {
         weights.insert("SOL/USD".to_string(), dec!(0.30));
 
         Self {
-            sniper_reserve_pct: dec!(0.25),
-            min_sniper_reserve_fiat: dec!(2.00),
+            sniper_reserve_pct: Decimal::ZERO,
+            min_sniper_reserve_fiat: Decimal::ZERO,
             min_order_floor: dec!(1.00),
             pair_weights: weights,
         }
@@ -46,6 +46,7 @@ pub struct BrainTelemetryDto {
 pub struct EngineBrain {
     pub config: RwLock<BrainConfig>,
     pub last_known_cash: RwLock<HashMap<String, Decimal>>,
+    pub active_pairs: RwLock<Vec<Symbol>>,
 }
 
 impl Default for EngineBrain {
@@ -59,6 +60,46 @@ impl EngineBrain {
         Self {
             config: RwLock::new(config),
             last_known_cash: RwLock::new(HashMap::new()),
+            active_pairs: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn register_active_pair(&self, symbol: Symbol) {
+        if let Ok(mut list) = self.active_pairs.write() {
+            if !list.iter().any(|s| s == &symbol) {
+                list.push(symbol);
+            }
+        }
+    }
+
+    pub fn remove_active_pair(&self, symbol: &Symbol) {
+        if let Ok(mut list) = self.active_pairs.write() {
+            list.retain(|s| s != symbol);
+        }
+    }
+
+    pub fn get_active_pairs_for_quote(&self, quote_currency: &str) -> Vec<Symbol> {
+        let quote_up = quote_currency.to_uppercase();
+        let list = self.active_pairs
+            .read()
+            .ok()
+            .map(|l| {
+                l.iter()
+                    .filter(|s| s.quote.to_uppercase() == quote_up)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if !list.is_empty() {
+            list
+        } else {
+            // Safety fallback if pairs haven't registered yet
+            if quote_up == "GBP" {
+                vec![Symbol::btc_gbp(), Symbol::eth_gbp(), Symbol::sol_gbp()]
+            } else {
+                vec![Symbol::btc_usd(), Symbol::eth_usd(), Symbol::sol_usd()]
+            }
         }
     }
 
@@ -100,7 +141,9 @@ impl EngineBrain {
 
         let cfg = self.config.read().unwrap().clone();
 
-        let sniper_reserve = if total_settled_cash <= cfg.min_sniper_reserve_fiat {
+        let sniper_reserve = if cfg.sniper_reserve_pct <= Decimal::ZERO || cfg.min_sniper_reserve_fiat <= Decimal::ZERO {
+            Decimal::ZERO
+        } else if total_settled_cash <= cfg.min_sniper_reserve_fiat {
             total_settled_cash
         } else {
             let proportional = total_settled_cash * cfg.sniper_reserve_pct;
