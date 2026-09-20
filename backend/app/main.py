@@ -152,12 +152,16 @@ async def circuit_breaker_kill(req: Optional[KillSwitchRequest] = None, mode: Op
 
 @app.post("/api/circuit-breaker/reset")
 async def reset_circuit_breaker(mode: Optional[str] = None):
+    ipc_res = None
     try:
-        await ipc_client.reset_circuit_breaker()
-    except Exception:
-        pass
+        ipc_res = await ipc_client.reset_circuit_breaker()
+    except Exception as e:
+        logger.warning(f"Notice dispatching circuit breaker reset via IPC: {e}")
+    
     runner = coordinator.get_runner(mode)
-    return runner.reset_circuit_breaker()
+    if hasattr(runner, "reset_circuit_breaker"):
+        return runner.reset_circuit_breaker()
+    return {"status": "success", "message": "Circuit breaker reset dispatched to Rust Engine via IPC", "ipc_result": ipc_res}
 
 class TuneSniperRequest(BaseModel):
     runner_id: Optional[str] = None
