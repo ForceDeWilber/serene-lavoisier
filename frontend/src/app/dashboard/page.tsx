@@ -63,11 +63,18 @@ export default function ProductionDashboard() {
 
   const handleKillSwitch = async () => {
     try {
-      const res = await fetch(`/api/proxy/circuit-breaker/kill?mode=live`, {
+      let res = await fetch(`/api/proxy/emergency/kill-switch?mode=live`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason: "Manual halt triggered from terminal" }),
       });
+      if (!res.ok) {
+        res = await fetch(`/api/proxy/circuit-breaker/kill?mode=live`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "Manual halt triggered from terminal" }),
+        });
+      }
       if (res.ok) {
         setStatusMessage("SYS: Circuit breaker tripped · Execution halted");
         fetchTelemetry();
@@ -79,7 +86,7 @@ export default function ProductionDashboard() {
     try {
       const res = await fetch(`/api/proxy/circuit-breaker/reset?mode=live`, { method: "POST" });
       if (res.ok) {
-        setStatusMessage("SYS: Circuit breaker reset");
+        setStatusMessage("SYS: Circuit breaker reset · Execution resumed");
         fetchTelemetry();
       }
     } catch {}
@@ -120,10 +127,21 @@ export default function ProductionDashboard() {
   const handleAddPair = async (config: any) => {
     try {
       const sym = `${config.base}/${config.quote}`;
+      const rawStep = parseFloat(String(config.grid_step_pct)) || 0.4;
+      const stepPct = rawStep > 0.05 ? rawStep / 100 : rawStep;
       const res = await fetch("/api/proxy/pairs?mode=live", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: sym, ...config }),
+        body: JSON.stringify({
+          symbol: sym,
+          base_asset: config.base,
+          quote_asset: config.quote,
+          envelope_capital: parseFloat(String(config.envelope_capital)) || 500.0,
+          grid_step_pct: stepPct,
+          grid_rungs: 5,
+          order_size_fiat: parseFloat(String(config.order_size_fiat)) || 50.0,
+          sniper_enabled: Boolean(config.sniper_enabled),
+        }),
       });
       if (res.ok) {
         setStatusMessage(`SYS: Pair ${sym} hot-spawned`);

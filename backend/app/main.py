@@ -145,6 +145,11 @@ async def emergency_kill_switch(req: KillSwitchRequest, mode: Optional[str] = No
     )
     return {"status": "success", "message": "Kill switch dispatched to Rust Engine via IPC"}
 
+@app.post("/api/circuit-breaker/kill")
+async def circuit_breaker_kill(req: Optional[KillSwitchRequest] = None, mode: Optional[str] = None):
+    reason = req.reason if req else "Manual Emergency Kill Switch Triggered via Dashboard"
+    return await emergency_kill_switch(KillSwitchRequest(reason=reason), mode=mode)
+
 @app.post("/api/circuit-breaker/reset")
 async def reset_circuit_breaker(mode: Optional[str] = None):
     try:
@@ -255,12 +260,30 @@ async def liquidate_pair(runner_id: str):
     return {"status": "success"}
 
 @app.delete("/api/pairs/{runner_id}")
-async def remove_pair(runner_id: str):
+async def remove_pair(runner_id: str, mode: Optional[str] = None):
     try:
         await ipc_client.remove_pair(runner_id)
-        from app.kraken_streamer import kraken_streamer
-        # If possible derive symbol from runner_id, e.g. runner_btc_gbp -> BTC/GBP
-        # But Kraken streamer automatically ignores symbols not in its active list.
+        from app.database import LiveSessionLocal, PaperSessionLocal
+        from app.models import PairConfiguration
+        
+        target_mode = (mode or coordinator.mode_config).lower()
+        sessions = [LiveSessionLocal] if target_mode == "live" else [PaperSessionLocal]
+        for sm in sessions:
+            try:
+                async with sm() as session:
+                    candidates = [runner_id, runner_id.upper(), runner_id.upper().replace("-", "/")]
+                    if runner_id.startswith("runner_") or runner_id.startswith("sniper_"):
+                        parts = runner_id.split("_")[1:]
+                        if len(parts) >= 2:
+                            candidates.append(f"{parts[0].upper()}/{parts[1].upper()}")
+                    for cand in candidates:
+                        p = await session.get(PairConfiguration, cand)
+                        if p:
+                            await session.delete(p)
+                            await session.commit()
+                            logger.info(f"Deleted pair {cand} from database")
+            except Exception as dbe:
+                logger.warning(f"Notice deleting pair from db: {dbe}")
     except Exception as e:
         logger.warning(f"Error removing pair: {e}")
     return {"status": "success"}

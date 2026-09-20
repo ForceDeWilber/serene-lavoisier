@@ -190,6 +190,12 @@ impl GridRunner {
                                             error!("[RISK-TRIGGER] [{}] Counter order rejected by risk engine: {}", self.runner_id, reason);
                                             let _ = self.execution_client.cancel_all_orders().await;
                                             self.is_paused = true;
+                                            for (_, ord) in self.strategy.active_orders.drain() {
+                                                if let Some(ref db) = self.db {
+                                                    db.update_order_status(&ord.client_order_id, "CANCELED").await;
+                                                }
+                                                self.risk_engine.release_order_capital(&ord).await;
+                                            }
                                         }
                                         Err(err) => {
                                             warn!("[RISK-REJECT] [{}] Counter order risk check failed: {}", self.runner_id, err);
@@ -371,6 +377,15 @@ impl GridRunner {
                 Ok(()) = self.tuning_rx.changed() => {
                     let update = self.tuning_rx.borrow().clone();
                     self.is_paused = update.paused;
+                    if self.is_paused && !self.strategy.active_orders.is_empty() {
+                        info!("[RUNNER-PAUSE] [{}] Runner paused/halted. Clearing {} active orders locally and releasing risk capital", self.runner_id, self.strategy.active_orders.len());
+                        for (_, ord) in self.strategy.active_orders.drain() {
+                            if let Some(ref db) = self.db {
+                                db.update_order_status(&ord.client_order_id, "CANCELED").await;
+                            }
+                            self.risk_engine.release_order_capital(&ord).await;
+                        }
+                    }
                     if let Some(step) = update.step_pct {
                         self.strategy.config.step_pct = step;
                         self.strategy.dynamic_pricing.config.base_step_pct = step;

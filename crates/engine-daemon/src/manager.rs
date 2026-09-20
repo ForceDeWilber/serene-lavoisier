@@ -62,11 +62,27 @@ impl RunnerManager {
     pub async fn spawn_pair(&self, config: PairConfig) -> anyhow::Result<()> {
         let sym_slash = config.symbol.as_slash();
 
-        // Check if already active
+        // Check if already active: if so, dynamically tune and persist updated config
         {
             let map = self.pairs.read().await;
-            if map.contains_key(&sym_slash) {
-                info!("Pair {} is already active in runner manager", sym_slash);
+            if let Some(handle) = map.get(&sym_slash) {
+                info!("Pair {} is already active, updating tuning parameters", sym_slash);
+                let mut curr_grid = handle.grid_tune_tx.borrow().clone();
+                curr_grid.step_pct = Some(config.grid_step_pct);
+                curr_grid.rebalance_threshold_pct = Some(config.rebalance_threshold_pct);
+                curr_grid.order_size_fiat = Some(config.order_size_fiat);
+                curr_grid.paused = !config.is_active;
+                let _ = handle.grid_tune_tx.send(curr_grid);
+
+                let mut curr_sniper = handle.sniper_tune_tx.borrow().clone();
+                curr_sniper.enabled = config.sniper_enabled;
+                curr_sniper.impulse_threshold_pct = Some(config.sniper_hurdle_pct);
+                curr_sniper.order_size_gbp = Some(config.sniper_order_size_fiat);
+                let _ = handle.sniper_tune_tx.send(curr_sniper);
+
+                if let Some(ref db) = self.db_store {
+                    let _ = db.upsert_pair_config(&config).await;
+                }
                 return Ok(());
             }
         }
@@ -277,9 +293,16 @@ impl RunnerManager {
         let mut map = self.pairs.write().await;
         // find symbol to remove
         let mut target_sym = None;
+        let mut target_symbol_obj = None;
         for (sym, handle) in map.iter() {
-            if handle.grid_runner_id == runner_id {
+            if handle.grid_runner_id == runner_id
+                || handle.sniper_runner_id == runner_id
+                || sym == runner_id
+                || runner_id.eq_ignore_ascii_case(sym)
+                || handle.config.symbol.as_slash() == runner_id
+            {
                 target_sym = Some(sym.clone());
+                target_symbol_obj = Some(handle.config.symbol.clone());
                 // Tell runners to pause/stop by tuning
                 let mut curr_grid = handle.grid_tune_tx.borrow().clone();
                 curr_grid.paused = true;
@@ -297,6 +320,16 @@ impl RunnerManager {
             if let Some(ref db) = self.db_store {
                 let _ = db.delete_pair_config(&sym).await;
             }
+            if let Some(symbol_obj) = target_symbol_obj {
+                if let Ok(active_orders) = self.execution_client.get_active_orders().await {
+                    for ord in active_orders {
+                        if ord.symbol == symbol_obj {
+                            info!("[REMOVE-CANCEL] Canceling active order {} for removed pair {}", ord.client_order_id, sym);
+                            let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
+                        }
+                    }
+                }
+            }
             info!("[MANAGER] Runner {} ({}) cleanly unmapped and deregistered", runner_id, sym);
             true
         } else {
@@ -308,35 +341,72 @@ impl RunnerManager {
     pub async fn liquidate_pair(&self, runner_id: &str) -> anyhow::Result<()> {
         let map = self.pairs.read().await;
         for handle in map.values() {
-            if handle.grid_runner_id == runner_id {
-                // Pause it so it stops trading
+            if handle.grid_runner_id == runner_id
+                || handle.sniper_runner_id == runner_id
+                || handle.config.symbol.as_slash() == runner_id
+                || runner_id.eq_ignore_ascii_case(&handle.config.symbol.as_slash())
+            {
+                // 1. Pause grid runner and disable sniper so no new orders are placed
                 let mut curr = handle.grid_tune_tx.borrow().clone();
                 curr.paused = true;
                 let _ = handle.grid_tune_tx.send(curr);
-                
-                // Get balances
+
+                let mut curr_sniper = handle.sniper_tune_tx.borrow().clone();
+                curr_sniper.enabled = false;
+                let _ = handle.sniper_tune_tx.send(curr_sniper);
+
+                // 2. Cancel resting orders for this pair to free reserved balances
+                if let Ok(active_orders) = self.execution_client.get_active_orders().await {
+                    for ord in active_orders {
+                        if ord.symbol == handle.config.symbol || ord.runner_id == handle.grid_runner_id || ord.runner_id == handle.sniper_runner_id {
+                            info!("[LIQUIDATE-CANCEL] Canceling resting order {} before liquidation", ord.client_order_id);
+                            let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
+                        }
+                    }
+                }
+
+                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+                // 3. Get total base balance available to sell
                 if let Ok(bals) = self.execution_client.get_balances().await {
                     let base = handle.config.symbol.base.clone();
                     if let Some(qty) = bals.get(&base) {
                         if *qty > dec!(0.0) {
-                            let order = trading_core::model::Order::new_market(
+                            let sell_price = if let Ok((best_bid, _)) = self.execution_client.get_bbo(&handle.config.symbol).await {
+                                if best_bid > dec!(0.0) {
+                                    // 2% discount below top bid ensures immediate aggressive taker fill
+                                    (best_bid * dec!(0.98)).round_dp(2)
+                                } else {
+                                    dec!(0.01)
+                                }
+                            } else {
+                                dec!(0.01)
+                            };
+
+                            let order = trading_core::model::Order::new_limit_taker(
                                 &handle.grid_runner_id,
                                 handle.config.symbol.clone(),
                                 trading_core::model::OrderSide::Sell,
+                                sell_price,
                                 *qty,
                             );
-                            info!("[LIQUIDATE-DISPATCH] [{}] Submitting market liquidation sell for {} {}", handle.grid_runner_id, qty, handle.config.symbol);
+                            info!("[LIQUIDATE-DISPATCH] [{}] Submitting taker liquidation sell for {} {} @ £{}", handle.grid_runner_id, qty, handle.config.symbol, sell_price);
                             match self.execution_client.submit_taker_order(&order).await {
                                 Ok(filled) => info!("[LIQUIDATE-FILLED] [{}] Market liquidated: {} {} @ £{}", handle.grid_runner_id, filled.qty, handle.config.symbol, filled.price),
-                                Err(e) => error!("[LIQUIDATE-FAILED] [{}] Market liquidation failed: {}", handle.grid_runner_id, e),
+                                Err(e) => {
+                                    error!("[LIQUIDATE-FAILED] [{}] Market liquidation failed: {}", handle.grid_runner_id, e);
+                                    return Err(anyhow::anyhow!("Market liquidation failed: {}", e));
+                                }
                             }
+                        } else {
+                            info!("[LIQUIDATE] [{}] Base balance for {} is 0, nothing to liquidate", handle.grid_runner_id, base);
                         }
                     }
                 }
                 return Ok(());
             }
         }
-        Err(anyhow::anyhow!("Runner not found"))
+        Err(anyhow::anyhow!("Runner not found: {}", runner_id))
     }
 
     pub async fn tune_sniper(
@@ -388,11 +458,16 @@ impl RunnerManager {
 
     pub async fn emergency_kill_switch(&self) {
         let _ = self.execution_client.cancel_all_orders().await;
+        self.risk_engine.trip_circuit_breaker("Emergency kill switch manually triggered").await;
         let map = self.pairs.read().await;
         for handle in map.values() {
             let mut curr = handle.grid_tune_tx.borrow().clone();
             curr.paused = true;
             let _ = handle.grid_tune_tx.send(curr);
+
+            let mut curr_sniper = handle.sniper_tune_tx.borrow().clone();
+            curr_sniper.enabled = false;
+            let _ = handle.sniper_tune_tx.send(curr_sniper);
         }
     }
 
@@ -403,6 +478,10 @@ impl RunnerManager {
             let mut curr = handle.grid_tune_tx.borrow().clone();
             curr.paused = false;
             let _ = handle.grid_tune_tx.send(curr);
+
+            let mut curr_sniper = handle.sniper_tune_tx.borrow().clone();
+            curr_sniper.enabled = true;
+            let _ = handle.sniper_tune_tx.send(curr_sniper);
         }
     }
 
