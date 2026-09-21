@@ -207,8 +207,16 @@ export default function ProductionDashboard() {
   // Quick mobile metrics
   const gbpBalance = toNum(telemetry?.balances?.GBP, 0);
   const portfolio = telemetry?.portfolio;
+  const audit = portfolio?.transfer_audit || telemetry?.capital_management?.transfer_audit;
   const totalEquity = toNum(portfolio?.total_equity_gbp, gbpBalance);
-  const depositedCash = toNum(portfolio?.total_deposited_cash_gbp ?? portfolio?.initial_budget_gbp, 35.00);
+  const depositedCash = toNum(
+    audit?.net_deposited_cash_gbp ??
+      portfolio?.net_deposited_cash_gbp ??
+      portfolio?.total_deposited_cash_gbp ??
+      portfolio?.initial_budget_gbp,
+    35.00
+  );
+  const realizedPnLGbp = toNum(portfolio?.total_realized_pnl_gbp ?? telemetry?.capital_management?.cumulative_profit_gbp, 0);
   const netPnLGbp = toNum(portfolio?.total_pnl_gbp, totalEquity - depositedCash);
   const netPnLPct = toNum(portfolio?.total_pnl_pct, depositedCash > 0 ? (netPnLGbp / depositedCash) * 100 : 0);
   const isSniperArmed = Boolean(telemetry?.sniper?.enabled);
@@ -229,13 +237,17 @@ export default function ProductionDashboard() {
       <div className="md:hidden bg-[#09090b] border-b border-gray-800 px-2 py-1.5 flex items-center justify-between text-[11px]">
         <div className="flex items-center gap-2">
           <div>
+            <span className="text-gray-500 text-[9px] block leading-none">REALIZED</span>
+            <span className="font-bold text-emerald-400">{formatGbp(realizedPnLGbp, 2, true)}</span>
+          </div>
+          <div className="border-l border-gray-800 pl-2">
             <span className="text-gray-500 text-[9px] block leading-none">EQUITY</span>
             <span className="font-bold text-gray-100">{formatGbp(totalEquity, 2)}</span>
           </div>
           <div className="border-l border-gray-800 pl-2">
             <span className="text-gray-500 text-[9px] block leading-none">NET PNL</span>
             <span className={`font-semibold ${netPnLGbp >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {formatGbp(netPnLGbp, 2, true)} ({formatPct(netPnLPct, 1, true)})
+              {formatGbp(netPnLGbp, 2, true)}
             </span>
           </div>
         </div>

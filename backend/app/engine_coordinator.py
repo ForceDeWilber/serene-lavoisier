@@ -312,6 +312,7 @@ class TradingEngineCoordinator:
                 # Net PnL = Total Equity - Total Deposited Cash
                 total_pnl_gbp = round(total_equity - total_deposited, 2)
                 total_pnl_pct = round((total_pnl_gbp / total_deposited) * 100.0, 2) if total_deposited > 0 else 0.0
+                total_realized_pnl_pct = round((total_realized_pnl / total_deposited) * 100.0, 2) if total_deposited > 0 else 0.0
                 unrealized_pnl_gbp = round(total_pnl_gbp - total_realized_pnl, 4)
 
                 # Update capital manager cumulative & locked profits
@@ -374,18 +375,35 @@ class TradingEngineCoordinator:
                     "portfolio": {
                         "total_equity_gbp": total_equity,
                         "total_deposited_cash_gbp": total_deposited,
+                        "net_deposited_cash_gbp": total_deposited,
                         "initial_budget_gbp": total_deposited,
                         "total_pnl_gbp": total_pnl_gbp,
                         "total_pnl_pct": total_pnl_pct,
                         "total_realized_pnl_gbp": total_realized_pnl,
+                        "total_realized_pnl_pct": total_realized_pnl_pct,
                         "unrealized_pnl_gbp": unrealized_pnl_gbp,
                         "crypto_holdings_value_gbp": round(crypto_total, 2),
                         "total_fee_savings_gbp": 0.0,
+                        "transfer_audit": {
+                            "status": capital_manager.last_audit_status,
+                            "deposits_count": len(capital_manager.deposits),
+                            "withdrawals_count": len(capital_manager.withdrawals),
+                            "total_deposits_gbp": capital_manager.total_deposits_gbp,
+                            "total_withdrawals_gbp": capital_manager.total_withdrawals_gbp,
+                            "net_deposited_cash_gbp": capital_manager.net_deposited_cash_gbp,
+                            "last_audit_timestamp": capital_manager.last_audit_timestamp,
+                            "recent_transfers": sorted(
+                                capital_manager.deposits + capital_manager.withdrawals,
+                                key=lambda x: x.get("created_date", 0),
+                                reverse=True,
+                            )[:10],
+                        },
                     },
                     "capital_management": {
                         "mode": "LIVE" if is_live else "PAPER",
                         "balance_source": "Revolut X Live HTTP/2 API" if is_live else "Virtual Paper Simulator",
                         "total_deposited_cash_gbp": total_deposited,
+                        "net_deposited_cash_gbp": total_deposited,
                         "starting_balance_gbp": total_deposited,
                         "settled_cash_gbp": gbp,
                         "available_trading_power_gbp": avail_bals.get("GBP", gbp),
@@ -394,6 +412,7 @@ class TradingEngineCoordinator:
                         "locked_profit_gbp": capital_manager.locked_profit_gbp,
                         "unlocked_profit_gbp": unlocked_profit,
                         "cumulative_profit_gbp": total_realized_pnl,
+                        "total_realized_pnl_pct": total_realized_pnl_pct,
                         "profit_lock_pct": round(capital_manager.profit_lock_pct * 100.0, 1),
                         "active_trading_power_gbp": gbp,
                         "expansion_ratio": 1.0,
@@ -409,6 +428,20 @@ class TradingEngineCoordinator:
                         "max_rolling_drawdown_pct": 0.0,
                         "circuit_breaker_tripped": payload.get("circuit_breaker_tripped", False),
                         "circuit_breaker_reason": payload.get("circuit_breaker_reason", "Normal"),
+                        "transfer_audit": {
+                            "status": capital_manager.last_audit_status,
+                            "deposits_count": len(capital_manager.deposits),
+                            "withdrawals_count": len(capital_manager.withdrawals),
+                            "total_deposits_gbp": capital_manager.total_deposits_gbp,
+                            "total_withdrawals_gbp": capital_manager.total_withdrawals_gbp,
+                            "net_deposited_cash_gbp": capital_manager.net_deposited_cash_gbp,
+                            "last_audit_timestamp": capital_manager.last_audit_timestamp,
+                            "recent_transfers": sorted(
+                                capital_manager.deposits + capital_manager.withdrawals,
+                                key=lambda x: x.get("created_date", 0),
+                                reverse=True,
+                            )[:10],
+                        },
                         "allocations": {
                             "trading_power_gbp": gbp,
                             "expansion_ratio": 1.0,

@@ -17,6 +17,25 @@ from app.backtest_engine import HistoricalBacktestEngine, BacktestRequest, Backt
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fastapi_control_plane")
 
+async def start_transfer_audit_loop():
+    """
+    Periodic background task running every 60 seconds.
+    Auto-detects deposits and withdrawals on Revolut X to keep cost basis and PnL synchronized.
+    """
+    from app.capital_manager import capital_manager
+    # Initial audit after 5 seconds to let connections establish
+    await asyncio.sleep(5)
+    while True:
+        try:
+            if coordinator.mode_config == "LIVE":
+                logger.debug("Running periodic Revolut X transfer audit...")
+                await capital_manager.audit_account_transfers(full_scan=False)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Background transfer audit exception: {e}")
+        await asyncio.sleep(60)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing FastAPI Control Plane...")
@@ -24,9 +43,11 @@ async def lifespan(app: FastAPI):
     # Start Trading Engine Coordinator (boots Live and/or Paper runners based on TRADING_MODE)
     await coordinator.start()
     bot_task = asyncio.create_task(start_discord_bot())
+    audit_task = asyncio.create_task(start_transfer_audit_loop())
     yield
     await coordinator.stop()
     bot_task.cancel()
+    audit_task.cancel()
     logger.info("Shutting down FastAPI Control Plane.")
 
 app = FastAPI(
@@ -294,8 +315,23 @@ async def remove_pair(runner_id: str, mode: Optional[str] = None):
 
 @app.post("/api/capital/sync-revolut")
 async def sync_revolut_balances():
+    from app.capital_manager import capital_manager
+    audit_res = await capital_manager.audit_account_transfers(full_scan=True)
     res = await coordinator.live_runner.verify_credentials_and_balances()
-    return {"status": "success", "payload": res}
+    return {
+        "status": "success",
+        "payload": {
+            "verification": res,
+            "transfer_audit": audit_res,
+            "cost_basis_gbp": capital_manager.total_deposited_cash_gbp,
+        }
+    }
+
+@app.post("/api/capital/audit-transfers")
+async def manual_audit_transfers():
+    from app.capital_manager import capital_manager
+    audit_res = await capital_manager.audit_account_transfers(full_scan=True)
+    return {"status": "success", "payload": audit_res}
 
 class AddPairRequest(BaseModel):
     symbol: str

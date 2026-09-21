@@ -98,12 +98,38 @@ export interface SniperTelemetry {
   recent_snipes: any[];
 }
 
+export interface TransferRecord {
+  id: string;
+  type: "receive" | "send" | string;
+  status: string;
+  currency: string;
+  amount: number | string;
+  amount_gbp: number | string;
+  created_date?: number;
+  processed_date?: number;
+}
+
+export interface TransferAuditInfo {
+  status: string;
+  deposits_count: number;
+  withdrawals_count: number;
+  total_deposits_gbp: number | string;
+  total_withdrawals_gbp: number | string;
+  net_deposited_cash_gbp: number | string;
+  last_audit_timestamp?: number;
+  recent_transfers?: TransferRecord[];
+}
+
 export interface CapitalManagement {
   balance_source: string;
   starting_balance_gbp: number | string;
   total_deposited_cash_gbp?: number | string;
+  net_deposited_cash_gbp?: number | string;
+  total_deposits_gbp?: number | string;
+  total_withdrawals_gbp?: number | string;
   settled_cash_gbp: number | string;
   cumulative_profit_gbp: number | string;
+  total_realized_pnl_pct?: number | string;
   profit_lock_pct: number | string;
   locked_profit_gbp: number | string;
   unlocked_profit_gbp: number | string;
@@ -115,6 +141,7 @@ export interface CapitalManagement {
   split_sol_pct?: number | string;
   unrealized_pnl_gbp?: number | string;
   crypto_holdings_value_gbp?: number | string;
+  transfer_audit?: TransferAuditInfo;
   allocations: {
     trading_power_gbp: number | string;
     expansion_ratio: number | string;
@@ -193,13 +220,16 @@ export interface TelemetryPayload {
   portfolio?: {
     total_equity_gbp: number | string;
     total_deposited_cash_gbp?: number | string;
+    net_deposited_cash_gbp?: number | string;
     initial_budget_gbp: number | string;
     total_pnl_gbp: number | string;
     total_pnl_pct: number | string;
     total_realized_pnl_gbp: number | string;
+    total_realized_pnl_pct?: number | string;
     unrealized_pnl_gbp?: number | string;
     crypto_holdings_value_gbp?: number | string;
     total_fee_savings_gbp: number | string;
+    transfer_audit?: TransferAuditInfo;
   };
   capital_management?: CapitalManagement;
   market_prices?: Record<string, MarketPriceInfo>;
