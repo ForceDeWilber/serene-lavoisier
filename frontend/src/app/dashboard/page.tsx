@@ -11,8 +11,9 @@ import { SniperPane } from "../../components/dashboard/SniperPane";
 import { GridPane } from "../../components/dashboard/GridPane";
 import { OrderBookPane } from "../../components/dashboard/OrderBookPane";
 import { TerminalLogPane } from "../../components/dashboard/TerminalLogPane";
+import { QuickViewMobile } from "../../components/dashboard/quickview/QuickViewMobile";
 
-type MobileTab = "overview" | "sniper" | "grid" | "capital" | "orders" | "assets" | "logs";
+type MobileTab = "quickview" | "grid" | "sniper" | "orders" | "capital" | "assets" | "logs";
 
 export default function ProductionDashboard() {
   const [telemetry, setTelemetry] = useState<TelemetryPayload | null>(null);
@@ -20,7 +21,7 @@ export default function ProductionDashboard() {
   const [isFeedStale, setIsFeedStale] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>("");
   const [syncingRevolut, setSyncingRevolut] = useState<boolean>(false);
-  const [mobileTab, setMobileTab] = useState<MobileTab>("overview");
+  const [mobileTab, setMobileTab] = useState<MobileTab>("quickview");
 
   const lastSeenRef = useRef<number>(Date.now());
   const stalenessCheckTimer = useRef<NodeJS.Timeout | null>(null);
@@ -222,7 +223,7 @@ export default function ProductionDashboard() {
   const isSniperArmed = Boolean(telemetry?.sniper?.enabled);
 
   return (
-    <main className="h-[100dvh] w-full bg-black text-gray-200 flex flex-col overflow-hidden font-mono text-xs select-none">
+    <main className="h-[100dvh] w-full bg-[#06090f] text-slate-200 flex flex-col overflow-hidden font-mono text-xs select-none">
       {/* 1. Terminal Header */}
       <TerminalHeader
         telemetry={telemetry}
@@ -233,45 +234,48 @@ export default function ProductionDashboard() {
         onLogout={handleLogout}
       />
 
-      {/* 2. Mobile Glance Ticker (visible on mobile only) */}
-      <div className="md:hidden bg-[#09090b] border-b border-gray-800 px-2 py-1.5 flex items-center justify-between text-[11px]">
-        <div className="flex items-center gap-2">
-          <div>
-            <span className="text-gray-500 text-[9px] block leading-none">REALIZED</span>
-            <span className="font-bold text-emerald-400">{formatGbp(realizedPnLGbp, 2, true)}</span>
+      {/* 2. Mobile Glance Ticker (visible on mobile only when not in quickview) */}
+      {mobileTab !== "quickview" && (
+        <div className="md:hidden bg-[#070b14] border-b border-sky-900/30 px-2.5 py-1.5 flex items-center justify-between text-[11px]">
+          <div className="flex items-center gap-2">
+            <div>
+              <span className="text-slate-400 text-[9px] block leading-none">REALIZED</span>
+              <span className="font-bold text-teal-300">{formatGbp(realizedPnLGbp, 2, true)}</span>
+            </div>
+            <div className="border-l border-slate-800 pl-2">
+              <span className="text-slate-400 text-[9px] block leading-none">EQUITY</span>
+              <span className="font-bold text-slate-100">{formatGbp(totalEquity, 2)}</span>
+            </div>
+            <div className="border-l border-slate-800 pl-2">
+              <span className="text-slate-400 text-[9px] block leading-none">NET PNL</span>
+              <span className={`font-semibold ${netPnLGbp >= 0 ? 'text-teal-300' : 'text-rose-400'}`}>
+                {formatGbp(netPnLGbp, 2, true)}
+              </span>
+            </div>
           </div>
-          <div className="border-l border-gray-800 pl-2">
-            <span className="text-gray-500 text-[9px] block leading-none">EQUITY</span>
-            <span className="font-bold text-gray-100">{formatGbp(totalEquity, 2)}</span>
-          </div>
-          <div className="border-l border-gray-800 pl-2">
-            <span className="text-gray-500 text-[9px] block leading-none">NET PNL</span>
-            <span className={`font-semibold ${netPnLGbp >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {formatGbp(netPnLGbp, 2, true)}
-            </span>
-          </div>
+          <button
+            onClick={handleToggleSniper}
+            className={`px-2 py-0.5 text-[10px] rounded border ${
+              isSniperArmed
+                ? 'bg-teal-950 text-teal-300 border-teal-800'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+          >
+            SNIPER: {isSniperArmed ? 'ARMED' : 'OFF'}
+          </button>
         </div>
-        <button
-          onClick={handleToggleSniper}
-          className={`px-2 py-0.5 text-[10px] border ${
-            isSniperArmed
-              ? 'bg-emerald-950/70 text-emerald-400 border-emerald-800'
-              : 'bg-red-950/70 text-red-400 border-red-800'
-          }`}
-        >
-          SNIPER: {isSniperArmed ? 'ARMED' : 'OFF'}
-        </button>
-      </div>
+      )}
+
 
       {/* 3. Mobile Navigation Tabs (visible on mobile only) */}
-      <div className="md:hidden bg-black border-b border-gray-800 flex overflow-x-auto scrollbar-none py-1 px-1.5 gap-1 text-[11px] flex-shrink-0">
+      <div className="md:hidden bg-[#070b14] border-b border-sky-900/30 flex overflow-x-auto scrollbar-none py-1.5 px-2 gap-1.5 text-[11px] flex-shrink-0">
         {(
           [
-            { key: "overview", label: "OVERVIEW" },
+            { key: "quickview", label: "⚡ QUICK VIEW" },
+            { key: "grid", label: "GRID TUNE" },
             { key: "sniper", label: "SNIPER" },
-            { key: "grid", label: "GRID" },
-            { key: "capital", label: "CAPITAL" },
             { key: "orders", label: "ORDERS" },
+            { key: "capital", label: "CAPITAL" },
             { key: "assets", label: "ASSETS" },
             { key: "logs", label: "LOGS" },
           ] as { key: MobileTab; label: string }[]
@@ -279,10 +283,10 @@ export default function ProductionDashboard() {
           <button
             key={tab.key}
             onClick={() => setMobileTab(tab.key)}
-            className={`px-2.5 py-1 transition-colors whitespace-nowrap ${
+            className={`px-3 py-1 rounded-lg transition-all whitespace-nowrap font-medium ${
               mobileTab === tab.key
-                ? "bg-gray-800 text-white font-bold border border-gray-700"
-                : "text-gray-500 hover:text-gray-300 border border-transparent"
+                ? "bg-sky-500/20 text-sky-300 font-bold border border-sky-500/40 shadow-sm"
+                : "text-slate-400 hover:text-slate-200 border border-transparent"
             }`}
           >
             {tab.label}
@@ -291,16 +295,14 @@ export default function ProductionDashboard() {
       </div>
 
       {/* 4. Mobile Body (visible on mobile only) */}
-      <div className="md:hidden flex-1 overflow-hidden min-h-0 flex flex-col">
-        {mobileTab === "overview" && (
-          <div className="flex-1 overflow-y-auto p-1.5 space-y-2 pb-16">
-            <div className="min-h-[250px]"><PortfolioPane telemetry={telemetry} onSyncRevolut={handleSyncRevolutBalances} syncingRevolut={syncingRevolut} /></div>
-            <div className="min-h-[280px]"><SniperPane telemetry={telemetry} onToggleSniper={handleToggleSniper} /></div>
-            <div className="min-h-[280px]"><GridPane telemetry={telemetry} onTuneRunner={handleTuneRunner} /></div>
-            <div className="min-h-[250px]"><OrderBookPane telemetry={telemetry} /></div>
-            <div className="min-h-[280px]"><AssetManagementPane telemetry={telemetry} onAddPair={handleAddPair} onRemovePair={handleRemovePair} onLiquidatePair={handleLiquidatePair} /></div>
-            <div className="min-h-[250px]"><TerminalLogPane telemetry={telemetry} statusMessage={statusMessage} /></div>
-          </div>
+      <div className="md:hidden flex-1 overflow-hidden min-h-0 flex flex-col bg-[#06090f]">
+        {mobileTab === "quickview" && (
+          <QuickViewMobile
+            telemetry={telemetry}
+            onSyncRevolut={handleSyncRevolutBalances}
+            syncingRevolut={syncingRevolut}
+            onToggleSniper={handleToggleSniper}
+          />
         )}
 
         {mobileTab === "sniper" && (
@@ -339,6 +341,7 @@ export default function ProductionDashboard() {
           </div>
         )}
       </div>
+
 
       {/* 5. Desktop 12-Column Grid Body (visible on desktop md+ only) */}
       <div className="hidden md:grid md:grid-cols-12 md:grid-rows-[45%_55%] gap-1 p-1 overflow-hidden min-h-0 flex-1">

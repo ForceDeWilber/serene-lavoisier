@@ -3,14 +3,20 @@
 @tailwind utilities;
 
 :root {
-  --background: #0d1117;
-  --foreground: #e6edf3;
-  --nordic-card: #161b22;
-  --nordic-border: #30363d;
-  --nordic-accent: #58a6ff;
-  --nordic-green: #3fb950;
-  --nordic-red: #f85149;
-  --nordic-amber: #d29922;
+  --background: #06090f;
+  --foreground: #e2e8f0;
+  --nordic-bg: #06090f;
+  --nordic-card: #0b1220;
+  --nordic-card-glass: rgba(11, 18, 32, 0.78);
+  --nordic-border: rgba(56, 189, 248, 0.12);
+  --nordic-border-subtle: rgba(255, 255, 255, 0.06);
+  --nordic-cyan: #38bdf8;
+  --nordic-blue: #60a5fa;
+  --nordic-sapphire: #1d4ed8;
+  --nordic-mint: #2dd4bf;
+  --nordic-rose: #fb7185;
+  --nordic-amber: #fbbf24;
+  --nordic-glow: rgba(56, 189, 248, 0.15);
 }
 
 body {
@@ -21,18 +27,35 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Glassmorphism & Nordic Utilities */
+.nordic-glass {
+  background: var(--nordic-card-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--nordic-border);
+}
+
+.nordic-glow-cyan {
+  box-shadow: 0 0 24px -6px rgba(56, 189, 248, 0.25);
+}
+
+.nordic-glow-mint {
+  box-shadow: 0 0 24px -6px rgba(45, 212, 191, 0.25);
+}
+
 /* Custom scrollbars */
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 4px;
+  height: 4px;
 }
 ::-webkit-scrollbar-track {
-  background: #0d1117;
+  background: #06090f;
 }
 ::-webkit-scrollbar-thumb {
-  background: #21262d;
-  border-radius: 3px;
+  background: #1e293b;
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #30363d;
+  background: #334155;
 }
+

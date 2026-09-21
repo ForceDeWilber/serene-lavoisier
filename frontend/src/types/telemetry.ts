@@ -238,8 +238,10 @@ export interface TelemetryPayload {
   engine_activity?: EngineActivity;
   engine_decisions?: EngineDecision[];
   resting_orders?: RestingOrder[];
+  active_orders?: RestingOrder[];
   resting_orders_count: number;
   live_trades?: LiveTradeEvent[];
+  trades?: LiveTradeEvent[];
   timestamp?: number;
   brain?: {
     total_settled_cash: number | string;
