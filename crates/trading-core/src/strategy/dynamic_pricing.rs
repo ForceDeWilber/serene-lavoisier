@@ -20,10 +20,15 @@ pub struct DynamicPricingConfig {
 
 impl Default for DynamicPricingConfig {
     fn default() -> Self {
+        let min_step = std::env::var("GRID_MIN_STEP_PCT")
+            .ok()
+            .and_then(|v| v.parse::<Decimal>().ok())
+            .unwrap_or(dec!(0.0009)); // 0.09% minimum spread for 0.00% maker fee on Revolut X
+
         Self {
             enabled: true,
             base_step_pct: dec!(0.0040),
-            min_step_pct: dec!(0.0015),
+            min_step_pct: min_step,
             max_step_pct: dec!(0.0150),
             baseline_volatility_pct: dec!(0.0010),
             inventory_gamma: dec!(0.08),
