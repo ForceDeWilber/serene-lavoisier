@@ -64,6 +64,17 @@ impl BinanceWsMultiplexer {
         )
     }
 
+    pub fn new_with_sender(ws_base_url: impl Into<String>, symbols: Vec<Symbol>, tick_tx: broadcast::Sender<MarketTick>) -> Self {
+        let (sub_tx, sub_rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            ws_base_url: ws_base_url.into(),
+            symbols,
+            tick_tx,
+            sub_tx,
+            sub_rx,
+        }
+    }
+
     pub fn subscribe_receiver(&self) -> broadcast::Receiver<MarketTick> {
         self.tick_tx.subscribe()
     }
@@ -86,13 +97,13 @@ impl BinanceWsMultiplexer {
         format!("{}usdt@trade", base_lower)
     }
 
-    /// Maps Binance symbol string (e.g. "SOLUSDT") back to matching internal Symbol
+    /// Maps Binance symbol string (e.g. "SOLUSDT") back to matching internal Symbol with USDT quote
     pub fn match_binance_symbol(binance_sym: &str, active_symbols: &HashSet<Symbol>) -> Option<Symbol> {
         let sym_upper = binance_sym.to_uppercase();
         for s in active_symbols {
             let expected = format!("{}USDT", s.base.to_uppercase());
             if sym_upper == expected {
-                return Some(s.clone());
+                return Some(Symbol::new(&s.base, "USDT"));
             }
         }
         None
@@ -251,10 +262,10 @@ mod tests {
         set.insert(Symbol::btc_gbp());
 
         let matched = BinanceWsMultiplexer::match_binance_symbol("SOLUSDT", &set);
-        assert_eq!(matched, Some(Symbol::sol_gbp()));
+        assert_eq!(matched, Some(Symbol::new("SOL", "USDT")));
 
         let matched_btc = BinanceWsMultiplexer::match_binance_symbol("BTCUSDT", &set);
-        assert_eq!(matched_btc, Some(Symbol::btc_gbp()));
+        assert_eq!(matched_btc, Some(Symbol::new("BTC", "USDT")));
 
         let unmatched = BinanceWsMultiplexer::match_binance_symbol("DOGEUSDT", &set);
         assert_eq!(unmatched, None);
@@ -279,7 +290,7 @@ mod tests {
 
         BinanceWsMultiplexer::handle_message(sample_json, &set, &tx);
         let tick = rx.try_recv().expect("Expected MarketTick from trade message");
-        assert_eq!(tick.symbol, Symbol::sol_gbp());
+        assert_eq!(tick.symbol, Symbol::new("SOL", "USDT"));
         assert_eq!(tick.bid, Decimal::from_str("108.24000000").unwrap());
         assert_eq!(tick.ask, Decimal::from_str("108.24000000").unwrap());
     }
@@ -306,7 +317,7 @@ mod tests {
 
         BinanceWsMultiplexer::handle_message(sample_json, &set, &tx);
         let tick = rx.try_recv().expect("Expected MarketTick from combined stream message");
-        assert_eq!(tick.symbol, Symbol::sol_gbp());
+        assert_eq!(tick.symbol, Symbol::new("SOL", "USDT"));
         assert_eq!(tick.bid, Decimal::from_str("108.35000000").unwrap());
     }
 }

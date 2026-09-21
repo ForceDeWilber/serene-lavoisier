@@ -243,13 +243,59 @@ impl GridRunner {
                 self.publish_telemetry();
                 }
                 
-                // Listen for market ticks multiplexed from Kraken WS
+                // Listen for market ticks multiplexed from Kraken / Binance WS
                 Ok(tick) = self.tick_rx.recv() => {
-                    if tick.symbol != self.symbol {
+                    if tick.symbol.base != self.symbol.base {
                         continue;
                     }
 
                     if self.is_paused {
+                        continue;
+                    }
+
+                    // 1. High-Frequency Lead Feed (Strictly Binance USDT Stream)
+                    if tick.symbol.quote == "USDT" {
+                        let (_regime, should_cancel_bids, should_reanchor_bottom) =
+                            self.alpha_engine.record_tick(tick.last, tick.timestamp);
+
+                        if should_cancel_bids {
+                            let buys_to_cancel: Vec<Order> = self.strategy.active_orders.values()
+                                .filter(|o| o.side == OrderSide::Buy)
+                                .cloned()
+                                .collect();
+
+                            if !buys_to_cancel.is_empty() {
+                                warn!(
+                                    "[ALPHA-SHIELD] [{}] Toxic plunge detected on Binance! Canceling {} resting BUY bids on Revolut X in < 80ms",
+                                    self.runner_id, buys_to_cancel.len()
+                                );
+
+                                for ord in buys_to_cancel {
+                                    let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
+                                    info!("[ORDER-CANCEL] [{}] Canceled resting BUY order {} due to toxic plunge", self.runner_id, ord.client_order_id);
+                                    if let Some(ref db) = self.db {
+                                        db.update_order_status(&ord.client_order_id, "CANCELED").await;
+                                    }
+                                    self.strategy.active_orders.remove(&ord.id);
+                                    self.risk_engine.release_order_capital(&ord).await;
+                                }
+                            }
+                        }
+
+                        if should_reanchor_bottom {
+                            info!(
+                                "[ALPHA-REANCHOR] [{}] Binance market stabilized after plunge. Re-anchoring grid center at next native quote tick.",
+                                self.runner_id
+                            );
+                            self.strategy.center_price = None;
+                            self.last_init_attempt = None;
+                        }
+
+                        continue;
+                    }
+
+                    // 2. Native Quote Feed (must exactly match runner symbol e.g. SOL/GBP)
+                    if tick.symbol != self.symbol {
                         continue;
                     }
 
@@ -258,39 +304,7 @@ impl GridRunner {
                     // Record tick in dynamic pricing model to track rolling volatility
                     self.strategy.record_tick(mid_price, tick.timestamp);
 
-                    // 2. Alpha Engine: Ingest high-frequency tick to evaluate plunge, stabilization, and surge
-                    let (regime, should_cancel_bids, should_reanchor_bottom) = self.alpha_engine.record_tick(mid_price, tick.timestamp);
-
-                    if should_cancel_bids {
-                        let buys_to_cancel: Vec<Order> = self.strategy.active_orders.values()
-                            .filter(|o| o.side == OrderSide::Buy)
-                            .cloned()
-                            .collect();
-
-                        warn!(
-                            "[ALPHA-SHIELD] [{}] Toxic plunge detected! Canceling {} resting BUY bids on Revolut X in < 80ms",
-                            self.runner_id, buys_to_cancel.len()
-                        );
-
-                        for ord in buys_to_cancel {
-                            let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
-                            info!("[ORDER-CANCEL] [{}] Canceled resting BUY order {} due to toxic plunge", self.runner_id, ord.client_order_id);
-                            if let Some(ref db) = self.db {
-                                db.update_order_status(&ord.client_order_id, "CANCELED").await;
-                            }
-                            self.strategy.active_orders.remove(&ord.id);
-                            self.risk_engine.release_order_capital(&ord).await;
-                        }
-                    }
-
-                    if should_reanchor_bottom {
-                        info!(
-                            "[ALPHA-REANCHOR] [{}] Market stabilized after plunge at bottom (£{}). Re-anchoring grid center for fresh deployment.",
-                            self.runner_id, mid_price
-                        );
-                        self.strategy.center_price = None;
-                        self.last_init_attempt = None;
-                    }
+                    let regime = self.alpha_engine.current_regime();
 
                     // 3. Process fills in paper simulator if present
                     if let Some(ref sim) = self.simulator {

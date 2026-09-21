@@ -130,29 +130,28 @@ async fn main() -> anyhow::Result<()> {
 
     let initial_symbols: Vec<trading_core::model::Symbol> = active_pair_configs.iter().map(|p| p.symbol.clone()).collect();
 
-    // 5. Market Feed Multiplexer (Configurable: Binance vs Kraken Oracle)
-    let market_feed = std::env::var("MARKET_FEED_SOURCE").unwrap_or_else(|_| "BINANCE".into()).to_uppercase();
-    let (sub_tx, tick_broadcast) = if market_feed == "KRAKEN" {
-        info!("Initializing KRAKEN WebSocket v2 feed as market oracle...");
-        let kraken_ws_url = std::env::var("KRAKEN_WS_URL").unwrap_or_else(|_| "wss://ws.kraken.com/v2".into());
-        let (kraken_multiplexer, _primary_rx) = KrakenWsMultiplexer::new(&kraken_ws_url, initial_symbols);
-        let sub_tx = kraken_multiplexer.subscribe_sender();
-        let tick_broadcast = kraken_multiplexer.tick_sender();
-        tokio::spawn(async move {
-            kraken_multiplexer.run().await;
-        });
-        (sub_tx, tick_broadcast)
-    } else {
-        info!("Initializing BINANCE High-Frequency (277 tr/min) WebSocket feed as market oracle...");
+    // 5. Market Feed Multiplexers (Dual-Oracle: Kraken for GBP Pricing + Binance for High-Frequency Alpha)
+    let market_feed = std::env::var("MARKET_FEED_SOURCE").unwrap_or_else(|_| "DUAL".into()).to_uppercase();
+    
+    // Always start Kraken for authentic quote pricing in native fiat (e.g. SOL/GBP)
+    info!("Initializing KRAKEN WebSocket v2 feed for authentic quote pricing...");
+    let kraken_ws_url = std::env::var("KRAKEN_WS_URL").unwrap_or_else(|_| "wss://ws.kraken.com/v2".into());
+    let (kraken_multiplexer, _primary_rx) = KrakenWsMultiplexer::new(&kraken_ws_url, initial_symbols.clone());
+    let sub_tx = kraken_multiplexer.subscribe_sender();
+    let tick_broadcast = kraken_multiplexer.tick_sender();
+    tokio::spawn(async move {
+        kraken_multiplexer.run().await;
+    });
+
+    // When in DUAL (default) or BINANCE mode, also spawn Binance high-frequency alpha lead feed
+    if market_feed != "KRAKEN_ONLY" {
+        info!("Initializing BINANCE High-Frequency (277 tr/min) WebSocket feed for Alpha Momentum & Plunge Shield...");
         let binance_ws_url = std::env::var("BINANCE_WS_URL").unwrap_or_else(|_| "wss://stream.binance.com:9443".into());
-        let (binance_multiplexer, _primary_rx) = BinanceWsMultiplexer::new(&binance_ws_url, initial_symbols);
-        let sub_tx = binance_multiplexer.subscribe_sender();
-        let tick_broadcast = binance_multiplexer.tick_sender();
+        let binance_multiplexer = BinanceWsMultiplexer::new_with_sender(&binance_ws_url, initial_symbols, tick_broadcast.clone());
         tokio::spawn(async move {
             binance_multiplexer.run().await;
         });
-        (sub_tx, tick_broadcast)
-    };
+    }
 
     // 6. Dynamic Runner Manager
     let runner_manager = Arc::new(RunnerManager::new(
