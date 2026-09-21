@@ -87,10 +87,16 @@ async function forwardRequest(
       parsedData = data;
     }
 
+    // For GET requests on telemetry, allow Vercel Edge CDN to serve from cache for 1s with SWR 2s
+    const isTelemetryGet = req.method === "GET" && subPath.includes("telemetry");
+    const cacheControl = isTelemetryGet
+      ? "public, s-maxage=1, stale-while-revalidate=2"
+      : "no-store, max-age=0";
+
     return NextResponse.json(parsedData, {
       status: backendRes.status,
       headers: {
-        "Cache-Control": "no-store, max-age=0",
+        "Cache-Control": cacheControl,
       },
     });
   } catch (error: any) {

@@ -25,8 +25,8 @@ export default function ProductionDashboard() {
   const lastSeenRef = useRef<number>(Date.now());
   const stalenessCheckTimer = useRef<NodeJS.Timeout | null>(null);
 
-  const REFRESH_INTERVAL_MS = 1000;
-  const STALE_THRESHOLD_MS = 2500;
+  const REFRESH_INTERVAL_MS = 3000;
+  const STALE_THRESHOLD_MS = 7500;
 
   const fetchTelemetry = async () => {
     try {
@@ -44,20 +44,37 @@ export default function ProductionDashboard() {
   useEffect(() => {
     let active = true;
 
-    fetchTelemetry();
-    const pollInterval = setInterval(() => {
-      if (active) fetchTelemetry();
-    }, REFRESH_INTERVAL_MS);
+    const tick = () => {
+      if (active && typeof document !== "undefined" && document.visibilityState === "visible") {
+        fetchTelemetry();
+      }
+    };
+
+    tick();
+    const pollInterval = setInterval(tick, REFRESH_INTERVAL_MS);
+
+    const onVisibilityChange = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        tick();
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
 
     stalenessCheckTimer.current = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
       const elapsed = Date.now() - lastSeenRef.current;
       setIsFeedStale(elapsed > STALE_THRESHOLD_MS);
-    }, 500);
+    }, 1000);
 
     return () => {
       active = false;
       clearInterval(pollInterval);
       if (stalenessCheckTimer.current) clearInterval(stalenessCheckTimer.current);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
     };
   }, []);
 
