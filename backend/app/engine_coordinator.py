@@ -317,9 +317,12 @@ class TradingEngineCoordinator:
 
                 # Update capital manager cumulative & locked profits
                 capital_manager.cumulative_profit_gbp = total_realized_pnl
-                target_locked = round(total_realized_pnl * capital_manager.profit_lock_pct, 2)
-                if target_locked > capital_manager.locked_profit_gbp:
-                    capital_manager.locked_profit_gbp = target_locked
+                if capital_manager.profit_lock_pct <= 0.0:
+                    capital_manager.locked_profit_gbp = 0.0
+                else:
+                    target_locked = round(total_realized_pnl * capital_manager.profit_lock_pct, 2)
+                    if target_locked > capital_manager.locked_profit_gbp:
+                        capital_manager.locked_profit_gbp = target_locked
                 unlocked_profit = max(0.0, round(total_realized_pnl - capital_manager.locked_profit_gbp, 4))
 
                 status = "ACTIVE"

@@ -27,8 +27,8 @@ class CapitalManager:
         }
 
         # Dynamic Profit Lock Configuration
-        # Default: 30% of realized profits are locked permanently into a secure reserve vault
-        self.profit_lock_pct: float = 0.30
+        # Default: 0% profit lock (100% full compounding reinvestment mode)
+        self.profit_lock_pct: float = 0.00
         self.locked_profit_gbp: float = 0.0
         self.cumulative_profit_gbp: float = 0.0
 
@@ -421,9 +421,12 @@ class CapitalManager:
         self.cumulative_profit_gbp = round(self.cumulative_profit_gbp + profit_gbp, 2)
 
         # High-water mark ratchet: profits once locked into the reserve vault can never decrease
-        target_locked = round(self.cumulative_profit_gbp * self.profit_lock_pct, 2)
-        if target_locked > self.locked_profit_gbp:
-            self.locked_profit_gbp = target_locked
+        if self.profit_lock_pct <= 0.0:
+            self.locked_profit_gbp = 0.0
+        else:
+            target_locked = round(self.cumulative_profit_gbp * self.profit_lock_pct, 2)
+            if target_locked > self.locked_profit_gbp:
+                self.locked_profit_gbp = target_locked
         self._save_state()
 
     def get_active_trading_power(self) -> float:
@@ -484,9 +487,10 @@ class CapitalManager:
         """
         if profit_lock_pct is not None:
             self.profit_lock_pct = max(0.0, min(0.90, float(profit_lock_pct)))
-            # Recalculate locked profit with new ratio (ratchet ensures never decreases below existing lock)
-            target = round(self.cumulative_profit_gbp * self.profit_lock_pct, 2)
-            if target > self.locked_profit_gbp:
+            if self.profit_lock_pct <= 0.0:
+                self.locked_profit_gbp = 0.0
+            else:
+                target = round(self.cumulative_profit_gbp * self.profit_lock_pct, 2)
                 self.locked_profit_gbp = target
 
         if split_btc_pct is not None:
