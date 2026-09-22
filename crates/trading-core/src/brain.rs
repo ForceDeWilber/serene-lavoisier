@@ -80,7 +80,7 @@ impl EngineBrain {
 
     pub fn get_active_pairs_for_quote(&self, quote_currency: &str) -> Vec<Symbol> {
         let quote_up = quote_currency.to_uppercase();
-        let list = self.active_pairs
+        self.active_pairs
             .read()
             .ok()
             .map(|l| {
@@ -89,18 +89,7 @@ impl EngineBrain {
                     .cloned()
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
-
-        if !list.is_empty() {
-            list
-        } else {
-            // Safety fallback if pairs haven't registered yet
-            if quote_up == "GBP" {
-                vec![Symbol::btc_gbp(), Symbol::eth_gbp(), Symbol::sol_gbp()]
-            } else {
-                vec![Symbol::btc_usd(), Symbol::eth_usd(), Symbol::sol_usd()]
-            }
-        }
+            .unwrap_or_default()
     }
 
     pub fn update_cash(&self, currency: &str, cash: Decimal) {

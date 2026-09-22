@@ -52,6 +52,7 @@ pub struct GridRunner {
     telemetry_tx: Option<watch::Sender<RunnerTelemetry>>,
     brain: Option<Arc<crate::brain::EngineBrain>>,
     last_init_attempt: Option<tokio::time::Instant>,
+    last_fill_instant: Option<tokio::time::Instant>,
     alpha_engine: crate::strategy::AlphaMomentumEngine,
 }
 
@@ -81,6 +82,7 @@ impl GridRunner {
             telemetry_tx: None,
             brain: None,
             last_init_attempt: None,
+            last_fill_instant: None,
             alpha_engine: crate::strategy::AlphaMomentumEngine::new(crate::strategy::AlphaConfig::default()),
         }
     }
@@ -198,6 +200,7 @@ impl GridRunner {
 
                                 for fill in fills_to_process {
                                     info!("[ORDER-FILL] [{}] Live venue fill confirmed: Order {} ({} {} @ £{})", self.runner_id, fill.client_order_id, fill.side, fill.qty, fill.price);
+                                    self.last_fill_instant = Some(tokio::time::Instant::now());
                                     self.risk_engine.settle_fill(&fill).await;
                                     if let Some(ref db) = self.db {
                                         db.update_order_status(&fill.client_order_id, "FILLED").await;
@@ -311,6 +314,7 @@ impl GridRunner {
                         let fills = sim.process_tick(&tick).await;
                         for fill in fills {
                             info!("[ORDER-FILL] [{}] Simulator fill: Order {} ({} {} @ £{})", self.runner_id, fill.client_order_id, fill.side, fill.qty, fill.price);
+                            self.last_fill_instant = Some(tokio::time::Instant::now());
                             self.risk_engine.settle_fill(&fill).await;
                             if let Some(counter_order) = self.strategy.on_fill(&fill) {
                                 info!(
@@ -350,7 +354,12 @@ impl GridRunner {
                         let balances = self.execution_client.get_available_balances().await.ok();
                         let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
                         let free_fiat = if let Some(ref brain) = self.brain {
-                            let active_pairs = brain.get_active_pairs_for_quote(&self.symbol.quote);
+                            let registered_pairs = brain.get_active_pairs_for_quote(&self.symbol.quote);
+                            let active_pairs = if registered_pairs.is_empty() {
+                                vec![self.symbol.clone()]
+                            } else {
+                                registered_pairs
+                            };
                             let (sniper_res, _, allocations) = brain.partition_capital(total_quote, &active_pairs);
                             let pair_budget = allocations.get(&self.symbol.as_slash()).copied().unwrap_or(Decimal::ZERO);
                             info!(
@@ -384,13 +393,25 @@ impl GridRunner {
                                 }
                             }
                         }
+                        self.last_fill_instant = Some(tokio::time::Instant::now());
                     }
 
-                    // 5. Check for rebalancing if price drifted significantly
-                    if self.strategy.needs_rebalance(mid_price) {
+                    // 5. Check for rebalancing with dynamic volatility, inventory & time-decay shrinkage
+                    let elapsed_since_fill = self.last_fill_instant.map(|t| t.elapsed());
+                    let oracle_lead = match regime {
+                        crate::strategy::MarketRegime::BullishSurge => Some(rust_decimal_macros::dec!(0.0035)),
+                        _ => None,
+                    };
+
+                    if self.strategy.needs_rebalance(mid_price, elapsed_since_fill, oracle_lead) {
+                        let effective_threshold = self.strategy.current_rebalance_threshold(elapsed_since_fill, oracle_lead);
                         info!(
-                            "[ORDER-INTENT] [{}] Price drifted significantly from center ({:.2} -> {:.2}). Rebalancing grid (clearing {} orders)",
-                            self.runner_id, self.strategy.center_price.unwrap_or_default(), mid_price, self.strategy.active_orders.len()
+                            "[ORDER-INTENT] [{}] Price drifted from center ({:.2} -> {:.2}) exceeding dynamic threshold {:.3}% (clearing {} orders)",
+                            self.runner_id,
+                            self.strategy.center_price.unwrap_or_default(),
+                            mid_price,
+                            effective_threshold * rust_decimal_macros::dec!(100.0),
+                            self.strategy.active_orders.len()
                         );
                         // Cancel existing orders
                         for (_, ord) in self.strategy.active_orders.drain() {
@@ -405,7 +426,12 @@ impl GridRunner {
                         let balances = self.execution_client.get_available_balances().await.ok();
                         let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
                         let free_fiat = if let Some(ref brain) = self.brain {
-                            let active_pairs = brain.get_active_pairs_for_quote(&self.symbol.quote);
+                            let registered_pairs = brain.get_active_pairs_for_quote(&self.symbol.quote);
+                            let active_pairs = if registered_pairs.is_empty() {
+                                vec![self.symbol.clone()]
+                            } else {
+                                registered_pairs
+                            };
                             let (_, _, allocations) = brain.partition_capital(total_quote, &active_pairs);
                             let pair_budget = allocations.get(&self.symbol.as_slash()).copied().unwrap_or(Decimal::ZERO);
                             self.risk_engine.register_envelope(&self.runner_id, &self.symbol.quote, pair_budget).await;
@@ -431,6 +457,7 @@ impl GridRunner {
                                 }
                             }
                         }
+                        self.last_fill_instant = Some(tokio::time::Instant::now());
                     }
                     self.publish_telemetry();
                 }

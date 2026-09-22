@@ -3,6 +3,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::time::Duration as StdDuration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DynamicPricingConfig {
@@ -16,6 +17,8 @@ pub struct DynamicPricingConfig {
     pub min_clip_fiat: Decimal,          // e.g. 1.00 (Revolut X order floor)
     pub max_clip_fiat: Decimal,          // e.g. 100.00
     pub volatility_window_secs: i64,     // e.g. 120s
+    pub min_rebalance_threshold_pct: Decimal, // e.g. 0.0035 (0.35% floor)
+    pub base_rebalance_halflife_secs: u64,    // e.g. 1800s (30 mins baseline decay)
 }
 
 impl Default for DynamicPricingConfig {
@@ -36,6 +39,8 @@ impl Default for DynamicPricingConfig {
             min_clip_fiat: dec!(1.00),
             max_clip_fiat: dec!(100.00),
             volatility_window_secs: 120,
+            min_rebalance_threshold_pct: dec!(0.0035),
+            base_rebalance_halflife_secs: 1800,
         }
     }
 }
@@ -180,6 +185,73 @@ impl DynamicPriceModel {
             clip
         }
     }
+
+    /// Calculates the dynamic rebalance threshold with continuous time-decay shrinkage,
+    /// volatility modulation, inventory weighting, and oracle dislocation acceleration.
+    ///
+    /// Formula:
+    /// tau = tau_0 * (vol / baseline_vol) * (1 + gamma * max(0, inventory_base))
+    /// theta(t) = theta_min + (theta_base - theta_min) * exp(-elapsed / tau)
+    pub fn calculate_dynamic_rebalance_threshold(
+        &self,
+        base_threshold: Decimal,
+        elapsed_since_fill: Option<StdDuration>,
+        inventory_base: Decimal,
+        oracle_lead_pct: Option<Decimal>,
+    ) -> Decimal {
+        if !self.config.enabled {
+            return base_threshold;
+        }
+
+        let min_threshold = self.config.min_rebalance_threshold_pct.min(base_threshold);
+
+        let elapsed_secs = match elapsed_since_fill {
+            Some(d) => d.as_secs_f64(),
+            None => 0.0,
+        };
+
+        let current_vol = self.calculate_volatility();
+        let vol_f64 = current_vol.to_string().parse::<f64>().unwrap_or(0.001);
+        let base_vol_f64 = self
+            .config
+            .baseline_volatility_pct
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.001);
+        let vol_ratio = (vol_f64 / base_vol_f64).clamp(0.25, 4.0);
+
+        let inv_f64 = inventory_base.to_string().parse::<f64>().unwrap_or(0.0).max(0.0);
+        let gamma_f64 = self
+            .config
+            .inventory_gamma
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.08);
+        let inv_factor = (1.0 + gamma_f64 * inv_f64).clamp(1.0, 5.0);
+
+        let tau_0 = self.config.base_rebalance_halflife_secs as f64;
+        let tau = (tau_0 * vol_ratio * inv_factor).max(60.0); // At least 60s half-life
+
+        // Decay factor in (0.0, 1.0]
+        let decay = (-elapsed_secs / tau).exp();
+
+        let base_f64 = base_threshold.to_string().parse::<f64>().unwrap_or(0.012);
+        let min_f64 = min_threshold.to_string().parse::<f64>().unwrap_or(0.0035);
+
+        let mut dynamic_f64 = min_f64 + (base_f64 - min_f64) * decay;
+
+        // Oracle breakout acceleration: if leading venue is ahead by >= 0.10%, accelerate shrinkage
+        if let Some(oracle_lead) = oracle_lead_pct {
+            let lead_f64 = oracle_lead.to_string().parse::<f64>().unwrap_or(0.0);
+            if lead_f64 > 0.0010 {
+                let acceleration = (1.0 - (lead_f64 * 4.0)).clamp(0.5, 1.0);
+                dynamic_f64 *= acceleration;
+            }
+        }
+
+        let clamped_f64 = dynamic_f64.clamp(min_f64, base_f64);
+        Decimal::from_str_exact(&format!("{:.6}", clamped_f64)).unwrap_or(min_threshold)
+    }
 }
 
 #[cfg(test)]
@@ -248,5 +320,49 @@ mod tests {
         // Exhausted capital: $0.50 free fiat (< min clip $1.00) -> 0
         let clip3 = model.calculate_order_clip(dec!(0.50), 5, dec!(50.0));
         assert_eq!(clip3, dec!(0.0));
+    }
+
+    #[test]
+    fn test_dynamic_rebalance_threshold_time_decay() {
+        let config = DynamicPricingConfig::default();
+        let model = DynamicPriceModel::new(config);
+        let base_thresh = dec!(0.0120); // 1.2%
+
+        // At t = 0, threshold should equal base threshold
+        let t0 = model.calculate_dynamic_rebalance_threshold(base_thresh, Some(StdDuration::from_secs(0)), dec!(0.0), None);
+        assert_eq!(t0, base_thresh);
+
+        // At t = 1800s (1 half-life in quiet baseline), threshold should decay toward 0.35%
+        let t1800 = model.calculate_dynamic_rebalance_threshold(base_thresh, Some(StdDuration::from_secs(1800)), dec!(0.0), None);
+        assert!(t1800 < base_thresh, "Threshold should decay over time");
+        assert!(t1800 > dec!(0.0035), "Threshold should remain above min floor at 1 half-life");
+
+        // At t = 7200s (2 hours), threshold should approach min floor 0.35%
+        let t7200 = model.calculate_dynamic_rebalance_threshold(base_thresh, Some(StdDuration::from_secs(7200)), dec!(0.0), None);
+        assert!(t7200 <= dec!(0.0045), "Threshold should be near floor after 2 hours without fill");
+        assert!(t7200 >= dec!(0.0035), "Threshold must never breach min floor");
+    }
+
+    #[test]
+    fn test_dynamic_rebalance_volatility_and_inventory_modulation() {
+        let config = DynamicPricingConfig::default();
+        let mut model = DynamicPriceModel::new(config);
+        let base_thresh = dec!(0.0120);
+        let elapsed = Some(StdDuration::from_secs(900)); // 15 mins
+        let now = Utc::now();
+
+        // 1. In flat inventory (0.0 SOL), calculate 15 min decay
+        let decay_flat_inv = model.calculate_dynamic_rebalance_threshold(base_thresh, elapsed, dec!(0.0), None);
+
+        // 2. In heavy inventory (10.0 SOL), decay should be slower (half-life stretched)
+        let decay_heavy_inv = model.calculate_dynamic_rebalance_threshold(base_thresh, elapsed, dec!(10.0), None);
+        assert!(decay_heavy_inv > decay_flat_inv, "Heavy inventory should hold wider threshold longer to prevent over-buying");
+
+        // 3. In high volatility, decay should also be slower
+        model.record_sample(dec!(61000.0), now - Duration::seconds(20));
+        model.record_sample(dec!(59000.0), now - Duration::seconds(10));
+        model.record_sample(dec!(62000.0), now);
+        let decay_high_vol = model.calculate_dynamic_rebalance_threshold(base_thresh, elapsed, dec!(0.0), None);
+        assert!(decay_high_vol > decay_flat_inv, "High volatility should widen decay half-life");
     }
 }

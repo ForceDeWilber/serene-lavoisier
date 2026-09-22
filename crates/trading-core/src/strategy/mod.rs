@@ -10,6 +10,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration as StdDuration;
 use tracing::info;
 use uuid::Uuid;
 
@@ -321,14 +322,39 @@ impl GeometricGridStrategy {
         self.active_orders.remove(order_id)
     }
 
-    /// Checks if market mid-price drifted too far from grid center
-    pub fn needs_rebalance(&self, current_mid: Decimal) -> bool {
+    /// Checks if market mid-price drifted beyond the dynamic rebalance threshold
+    pub fn needs_rebalance(
+        &self,
+        current_mid: Decimal,
+        elapsed_since_fill: Option<StdDuration>,
+        oracle_lead_pct: Option<Decimal>,
+    ) -> bool {
         if let Some(center) = self.center_price {
             if center > Decimal::ZERO {
                 let drift = (current_mid - center).abs() / center;
-                return drift >= self.config.rebalance_threshold_pct;
+                let dynamic_threshold = self.dynamic_pricing.calculate_dynamic_rebalance_threshold(
+                    self.config.rebalance_threshold_pct,
+                    elapsed_since_fill,
+                    self.inventory_base,
+                    oracle_lead_pct,
+                );
+                return drift >= dynamic_threshold;
             }
         }
         false
+    }
+
+    /// Exposes the current effective dynamic rebalance threshold for telemetry and logging
+    pub fn current_rebalance_threshold(
+        &self,
+        elapsed_since_fill: Option<StdDuration>,
+        oracle_lead_pct: Option<Decimal>,
+    ) -> Decimal {
+        self.dynamic_pricing.calculate_dynamic_rebalance_threshold(
+            self.config.rebalance_threshold_pct,
+            elapsed_since_fill,
+            self.inventory_base,
+            oracle_lead_pct,
+        )
     }
 }
