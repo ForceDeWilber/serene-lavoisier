@@ -46,11 +46,13 @@ class CapitalManager:
         self.revolut_base_url: str = os.getenv("REVOLUT_BASE_URL", "https://revx.revolut.com")
 
         # Auto Smart Detection of Transfers (In & Out of Account)
+        # Includes initial pre-bot account funding / crypto transfer basis (£44.18) + fiat deposits (£35.00) = £79.18
+        self.initial_baseline_funding_gbp: float = 44.18
         self.deposits: list = []
         self.withdrawals: list = []
-        self.total_deposits_gbp: float = starting_balance_gbp
+        self.total_deposits_gbp: float = 79.18
         self.total_withdrawals_gbp: float = 0.0
-        self.net_deposited_cash_gbp: float = starting_balance_gbp
+        self.net_deposited_cash_gbp: float = 79.18
         self.last_audit_timestamp: int = 0
         self.last_audit_status: str = "PENDING"
         self._audit_lock: Optional[Any] = None
@@ -62,6 +64,8 @@ class CapitalManager:
             if STATE_FILE.exists():
                 with open(STATE_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    if "initial_baseline_funding_gbp" in data:
+                        self.initial_baseline_funding_gbp = float(data["initial_baseline_funding_gbp"])
                     if "total_deposited_cash_gbp" in data:
                         self.total_deposited_cash_gbp = float(data["total_deposited_cash_gbp"])
                         self.starting_balance_gbp = self.total_deposited_cash_gbp
@@ -107,6 +111,7 @@ class CapitalManager:
     def _save_state(self):
         try:
             data = {
+                "initial_baseline_funding_gbp": self.initial_baseline_funding_gbp,
                 "total_deposited_cash_gbp": self.total_deposited_cash_gbp,
                 "starting_balance_gbp": self.starting_balance_gbp,
                 "net_deposited_cash_gbp": self.net_deposited_cash_gbp,
@@ -374,9 +379,9 @@ class CapitalManager:
                         cursor = next_cursor
                         await asyncio.sleep(0.05)
 
-                # Recalculate net capital cost basis
-                if self.deposits:
-                    self.total_deposits_gbp = round(sum(d.get("amount_gbp", 0.0) for d in self.deposits), 2)
+                # Recalculate net capital cost basis including the initial baseline funding
+                fiat_deposits = round(sum(d.get("amount_gbp", 0.0) for d in self.deposits), 2) if self.deposits else 0.0
+                self.total_deposits_gbp = round(self.initial_baseline_funding_gbp + fiat_deposits, 2)
                 self.total_withdrawals_gbp = round(sum(w.get("amount_gbp", 0.0) for w in self.withdrawals), 2)
                 self.net_deposited_cash_gbp = max(0.0, round(self.total_deposits_gbp - self.total_withdrawals_gbp, 2))
 

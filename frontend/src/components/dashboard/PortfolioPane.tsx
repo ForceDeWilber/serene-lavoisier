@@ -27,7 +27,7 @@ export function PortfolioPane({ telemetry, onSyncRevolut, syncingRevolut }: Prop
       portfolio?.net_deposited_cash_gbp ??
       portfolio?.total_deposited_cash_gbp ??
       portfolio?.initial_budget_gbp,
-    35.00
+    79.18
   );
 
   const realizedPnLGbp = toNum(portfolio?.total_realized_pnl_gbp ?? capital?.cumulative_profit_gbp, 0);

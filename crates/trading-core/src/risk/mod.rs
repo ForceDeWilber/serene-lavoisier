@@ -215,7 +215,8 @@ impl CentralRiskEngine {
         match order.side {
             OrderSide::Buy => {
                 let required_currency = &order.symbol.quote;
-                let required_amount = order.price * order.qty;
+                let required_amount = (order.price * order.qty).round_dp(2);
+                let epsilon = dec!(0.005); // 0.5p tolerance for micro-decimal discrepancy
 
                 let mut envelopes = self.envelopes.lock().await;
                 let key = format!("{}:{}", order.runner_id, required_currency);
@@ -231,7 +232,7 @@ impl CentralRiskEngine {
                     }
                 })?;
 
-                if envelope.available < required_amount {
+                if envelope.available + epsilon < required_amount {
                     warn!(
                         "[RISK-REJECT] Order {} rejected: Envelope exhausted for {}. Required: {} {}, Available: {} {}",
                         order.client_order_id, order.runner_id, required_amount, required_currency, envelope.available, required_currency
@@ -243,15 +244,16 @@ impl CentralRiskEngine {
                     });
                 }
 
-                // Reserve the quote capital
-                envelope.lock(required_amount).map_err(|_| RiskError::EnvelopeExhausted {
+                // Reserve the quote capital up to available
+                let lock_amount = required_amount.min(envelope.available);
+                envelope.lock(lock_amount).map_err(|_| RiskError::EnvelopeExhausted {
                     currency: required_currency.clone(),
-                    required: required_amount,
+                    required: lock_amount,
                     available: envelope.available,
                 })?;
                 debug!(
                     "[RISK-LOCK] Locked {} {} in envelope {} for order {}",
-                    required_amount, required_currency, key, order.client_order_id
+                    lock_amount, required_currency, key, order.client_order_id
                 );
             }
             OrderSide::Sell => {
@@ -296,7 +298,7 @@ impl CentralRiskEngine {
             OrderSide::Sell => &order.symbol.base,
         };
         let amount = match order.side {
-            OrderSide::Buy => order.price * order.remaining_qty(),
+            OrderSide::Buy => (order.price * order.remaining_qty()).round_dp(2),
             OrderSide::Sell => order.remaining_qty(),
         };
 
@@ -314,7 +316,7 @@ impl CentralRiskEngine {
     /// Releases locked order capital upon fill completion so envelopes rotate properly
     pub async fn settle_fill(&self, fill: &crate::model::Fill) {
         let (currency, amount) = match fill.side {
-            OrderSide::Buy => (&fill.symbol.quote, fill.price * fill.qty),
+            OrderSide::Buy => (&fill.symbol.quote, (fill.price * fill.qty).round_dp(2)),
             OrderSide::Sell => (&fill.symbol.base, fill.qty),
         };
 
@@ -392,6 +394,25 @@ mod tests {
         let env_after = risk.get_envelope(runner_id, "GBP").await.unwrap();
         assert_eq!(env_after.locked, dec!(0.0));
         assert_eq!(env_after.available, dec!(100.0));
+    }
+
+    #[tokio::test]
+    async fn test_risk_engine_envelope_micro_precision_tolerance() {
+        let risk = CentralRiskEngine::new(dec!(0.05), dec!(0.006));
+        let runner_id = "runner_sol_gbp";
+
+        // Recreate exact live incident:
+        // Available: 15.52993406 GBP
+        // Order: price 86.91, qty 0.178690 -> raw 15.52997991 GBP, rounded 15.53 GBP
+        // Difference is 0.00004585 GBP (< 0.5p epsilon)
+        risk.register_envelope(runner_id, "GBP", dec!(15.52993406)).await;
+
+        let buy_order = Order::new_limit_post_only(runner_id, Symbol::sol_gbp(), OrderSide::Buy, dec!(86.91), dec!(0.178690));
+        assert!(risk.validate_order(&buy_order).await.is_ok(), "Order should pass with epsilon tolerance");
+
+        let env = risk.get_envelope(runner_id, "GBP").await.unwrap();
+        assert_eq!(env.available, dec!(0.0), "All remaining available capital should be locked");
+        assert_eq!(env.locked, dec!(15.52993406));
     }
 }
 

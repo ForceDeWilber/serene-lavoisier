@@ -271,5 +271,137 @@ mod tests {
         let gbp_pairs_after = brain.get_active_pairs_for_quote("GBP");
         assert_eq!(gbp_pairs_after.len(), 2);
     }
+
+    #[test]
+    fn test_penny_evaporation_shield_counter_sell() {
+        let config = GridConfig {
+            runner_id: "test_sol_runner".into(),
+            symbol: Symbol::sol_gbp(),
+            step_pct: dec!(0.0001), // Very tight 0.01% step
+            rungs_per_side: 3,
+            order_size_gbp: dec!(15.0),
+            rebalance_threshold_pct: dec!(0.01),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: None,
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+
+        // Fill buy: 0.02 SOL @ £88.31
+        let fill = Fill {
+            order_id: uuid::Uuid::new_v4(),
+            client_order_id: "buy_1".into(),
+            runner_id: "test_sol_runner".into(),
+            symbol: Symbol::sol_gbp(),
+            side: OrderSide::Buy,
+            price: dec!(88.31),
+            qty: dec!(0.02),
+            fee: dec!(0.0),
+            timestamp: chrono::Utc::now(),
+        };
+
+        let counter = strategy.on_fill(&fill).expect("Expected counter sell order");
+        assert_eq!(counter.side, OrderSide::Sell);
+        // Required delta to earn at least £0.01 on 0.02 SOL: 0.01 / 0.02 = £0.50
+        // Min viable sell price: £88.31 + £0.50 = £88.81
+        assert!(
+            counter.price >= dec!(88.81),
+            "Counter sell price £{} should be at least £88.81 to guarantee £0.01 profit",
+            counter.price
+        );
+        let gross_profit = (counter.price - fill.price) * fill.qty;
+        assert!(
+            gross_profit >= dec!(0.01),
+            "Expected gross profit £{} >= £0.01",
+            gross_profit
+        );
+    }
+
+    #[test]
+    fn test_penny_evaporation_shield_counter_buy() {
+        let config = GridConfig {
+            runner_id: "test_sol_runner".into(),
+            symbol: Symbol::sol_gbp(),
+            step_pct: dec!(0.0001), // Very tight 0.01% step
+            rungs_per_side: 3,
+            order_size_gbp: dec!(15.0),
+            rebalance_threshold_pct: dec!(0.01),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: None,
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+
+        // Fill sell: 0.02 SOL @ £88.81
+        let fill = Fill {
+            order_id: uuid::Uuid::new_v4(),
+            client_order_id: "sell_1".into(),
+            runner_id: "test_sol_runner".into(),
+            symbol: Symbol::sol_gbp(),
+            side: OrderSide::Sell,
+            price: dec!(88.81),
+            qty: dec!(0.02),
+            fee: dec!(0.0),
+            timestamp: chrono::Utc::now(),
+        };
+
+        let counter = strategy.on_fill(&fill).expect("Expected counter buy order");
+        assert_eq!(counter.side, OrderSide::Buy);
+        // Required delta to buy back £0.01 cheaper on 0.02 SOL: 0.01 / 0.02 = £0.50
+        // Max viable buy price: £88.81 - £0.50 = £88.31
+        assert!(
+            counter.price <= dec!(88.31),
+            "Counter buy price £{} should be <= £88.31 to guarantee £0.01 discount",
+            counter.price
+        );
+        let gross_discount = (fill.price - counter.price) * fill.qty;
+        assert!(
+            gross_discount >= dec!(0.01),
+            "Expected gross discount £{} >= £0.01",
+            gross_discount
+        );
+    }
+
+    #[test]
+    fn test_sell_clip_sizes_independently_from_low_fiat() {
+        let config = GridConfig {
+            runner_id: "test_sol_runner".into(),
+            symbol: Symbol::sol_gbp(),
+            step_pct: dec!(0.002),
+            rungs_per_side: 5,
+            order_size_gbp: dec!(25.0),
+            rebalance_threshold_pct: dec!(0.012),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: None,
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+        let center = dec!(88.00);
+
+        // Case: free_fiat is almost depleted (£1.50 available fiat),
+        // but user holds 0.80 SOL (~£70.40 inventory value).
+        let orders = strategy.initialize_grid(center, Some(dec!(1.50)), Some(dec!(0.80)));
+        let sells: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Sell).collect();
+
+        assert_eq!(sells.len(), 5, "Expected all 5 sell rungs to be generated");
+        // Each sell rung should sell ~£14.08 of SOL (£70.40 / 5 rungs), NOT be crushed down to £1.00!
+        for s in sells {
+            let notional = s.price * s.qty;
+            assert!(
+                notional >= dec!(13.00),
+                "Sell order notional £{} was improperly clamped by low fiat! Should be ~£14.08",
+                notional
+            );
+        }
+    }
 }
 

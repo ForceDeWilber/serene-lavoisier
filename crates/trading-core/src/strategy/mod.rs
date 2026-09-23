@@ -177,17 +177,14 @@ impl GeometricGridStrategy {
             let min_clip = dec!(1.00);
 
             if total_inv_val >= min_clip {
-                let sell_clip = if order_clip >= min_clip {
-                    order_clip.min(total_inv_val)
-                } else {
-                    let rungs_dec = Decimal::from(self.config.rungs_per_side.max(1));
-                    let per_rung = (total_inv_val / rungs_dec).round_dp(2);
-                    per_rung.min(self.config.order_size_gbp).max(min_clip)
-                };
+                let rungs_dec = Decimal::from(self.config.rungs_per_side.max(1));
+                let per_rung = (total_inv_val / rungs_dec).round_dp(2);
+                let sell_clip = per_rung.min(self.config.order_size_gbp).max(min_clip);
 
                 // Strict No-Loss Floor: Ensure sell price is at or above cost basis (+0.15% minimum profit margin)
                 let min_profit_multiplier = dec!(1.0015);
                 let floor_price = self.config.cost_basis.map(|cb| (cb * min_profit_multiplier).round_dp(2));
+                let min_profit_floor_fiat = dec!(0.01);
 
                 for _ in 1..=self.config.rungs_per_side {
                     current_sell_multiplier *= one + dynamic_step;
@@ -214,16 +211,30 @@ impl GeometricGridStrategy {
                         break;
                     }
 
+                    // Guarantee each sell rung yields at least £0.01 gross profit above cost basis (if set) or effective center
+                    let reference_price = self.config.cost_basis.unwrap_or(effective_center);
+                    let raw_delta = min_profit_floor_fiat / qty;
+                    let required_delta = (raw_delta * dec!(100.0)).ceil() / dec!(100.0);
+                    let penny_floor = reference_price + required_delta.max(dec!(0.01));
+                    if rung_price < penny_floor {
+                        rung_price = penny_floor;
+                    }
+
                     // Check minimum order size on Revolut X (>= 1.00 in quote currency)
                     if (qty * rung_price).round_dp(2) < min_clip {
                         if (remaining_base * rung_price).round_dp(2) >= min_clip {
                             let sweep_qty = remaining_base;
                             allocated_sell_base += sweep_qty;
+                            let sweep_raw_delta = min_profit_floor_fiat / sweep_qty;
+                            let sweep_required_delta = (sweep_raw_delta * dec!(100.0)).ceil() / dec!(100.0);
+                            let sweep_penny_floor = reference_price + sweep_required_delta.max(dec!(0.01));
+                            let sweep_price = rung_price.max(sweep_penny_floor);
+
                             let order = Order::new_limit_post_only(
                                 &self.config.runner_id,
                                 self.config.symbol.clone(),
                                 OrderSide::Sell,
-                                rung_price,
+                                sweep_price,
                                 sweep_qty,
                             );
                             new_orders.push(order);
@@ -256,12 +267,29 @@ impl GeometricGridStrategy {
 
         let one = dec!(1.0);
         let dynamic_step = self.dynamic_pricing.calculate_dynamic_step();
+        let min_profit_floor_fiat = dec!(0.01);
 
         match fill.side {
             OrderSide::Buy => {
                 self.inventory_base += fill.qty;
                 // Place counter SELL order 1 dynamic step above fill price
-                let counter_price = (fill.price * (one + dynamic_step)).round_dp(2);
+                let mut counter_price = (fill.price * (one + dynamic_step)).round_dp(2);
+
+                // Hard Penny Evaporation Shield:
+                // Ensure the gross profit (counter_price - fill.price) * fill.qty is at least £0.01 (1 penny).
+                if fill.qty > Decimal::ZERO {
+                    let raw_delta = min_profit_floor_fiat / fill.qty;
+                    let required_delta = (raw_delta * dec!(100.0)).ceil() / dec!(100.0);
+                    let min_viable_price = fill.price + required_delta.max(dec!(0.01));
+                    if counter_price < min_viable_price {
+                        info!(
+                            "[{}] Penny Evaporation Shield: bumping counter SELL price from £{} to £{} (guarantee >= £0.01 profit on qty {})",
+                            self.config.runner_id, counter_price, min_viable_price, fill.qty
+                        );
+                        counter_price = min_viable_price;
+                    }
+                }
+
                 let order = Order::new_limit_post_only(
                     &self.config.runner_id,
                     self.config.symbol.clone(),
@@ -283,7 +311,8 @@ impl GeometricGridStrategy {
             OrderSide::Sell => {
                 self.inventory_base -= fill.qty;
                 // Realized profit calculation: (Sell Price - Buy Price) * Qty ~ step * notional
-                let profit = fill.price * fill.qty * dynamic_step;
+                // Guarantee at least 1 penny realized profit tracked
+                let profit = (fill.price * fill.qty * dynamic_step).max(min_profit_floor_fiat);
                 self.realized_pnl += profit;
 
                 if self.config.mode.as_deref() == Some("WIND_DOWN") {
@@ -294,8 +323,22 @@ impl GeometricGridStrategy {
                     return None;
                 }
 
-                // Place counter BUY order 1 dynamic step below fill price
-                let counter_price = (fill.price * (one - dynamic_step)).round_dp(2);
+                // Place counter BUY order 1 dynamic step below fill price,
+                // also respecting penny shield so the buy-back discount earns at least 1 penny.
+                let mut counter_price = (fill.price * (one - dynamic_step)).round_dp(2);
+                if fill.qty > Decimal::ZERO {
+                    let raw_delta = min_profit_floor_fiat / fill.qty;
+                    let required_delta = (raw_delta * dec!(100.0)).ceil() / dec!(100.0);
+                    let max_viable_buy = fill.price - required_delta.max(dec!(0.01));
+                    if counter_price > max_viable_buy && max_viable_buy > Decimal::ZERO {
+                        info!(
+                            "[{}] Penny Evaporation Shield: lowering counter BUY price from £{} to £{} (guarantee >= £0.01 discount on qty {})",
+                            self.config.runner_id, counter_price, max_viable_buy, fill.qty
+                        );
+                        counter_price = max_viable_buy;
+                    }
+                }
+
                 let order = Order::new_limit_post_only(
                     &self.config.runner_id,
                     self.config.symbol.clone(),

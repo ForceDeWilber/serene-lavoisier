@@ -47,6 +47,11 @@ export const AllocationDonutCard: React.FC<AllocationDonutCardProps> = ({ teleme
     const trapsPct = (activeTrapsCapital / total) * 100;
     const cryptoPct = (cryptoHoldingsGbp / total) * 100;
 
+    const cryptoLabel =
+      balances?.SOL && toNum(balances.SOL, 0) > 0
+        ? "SOL Holdings"
+        : "Crypto Holdings";
+
     return [
       {
         id: "free_cash",
@@ -59,21 +64,21 @@ export const AllocationDonutCard: React.FC<AllocationDonutCardProps> = ({ teleme
       {
         id: "active_traps",
         label: "Resting Buy Traps",
-        amount: activeTrapsCapital > 0 ? activeTrapsCapital : 18.23,
-        pct: trapsPct > 0 ? trapsPct : 24.0,
+        amount: activeTrapsCapital,
+        pct: trapsPct,
         color: "#3b82f6", // Arctic Blue
         icon: Layers,
       },
       {
         id: "crypto_holdings",
-        label: "Crypto Dust (BTC/ETH)",
+        label: cryptoLabel,
         amount: cryptoHoldingsGbp,
         pct: cryptoPct,
         color: "#fbbf24", // Amber
         icon: Coins,
       },
     ];
-  }, [totalEquity, freeCash, activeTrapsCapital, cryptoHoldingsGbp]);
+  }, [totalEquity, freeCash, activeTrapsCapital, cryptoHoldingsGbp, balances?.SOL]);
 
   // SVG circular geometry
   const radius = 62;
