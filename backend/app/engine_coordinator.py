@@ -142,6 +142,7 @@ class TradingEngineCoordinator:
                                 "direction": "NO_DATA", "lead_advantage_ms": 0,
                             }
 
+                        p_dp = 4 if pr < 10 else 2
                         sn_data = snipers_by_symbol.get(s)
                         has_live_bbo = sn_data and sn_data.get("revolut_best_ask") is not None and sn_data.get("revolut_best_bid") is not None
                         if has_live_bbo:
@@ -149,17 +150,17 @@ class TradingEngineCoordinator:
                                 rev_ask = float(sn_data["revolut_best_ask"])
                                 rev_bid = float(sn_data["revolut_best_bid"])
                             except (ValueError, TypeError):
-                                rev_ask = round(pr * 1.0005, 2)
-                                rev_bid = round(pr * 0.9995, 2)
+                                rev_ask = round(pr * 1.0005, p_dp)
+                                rev_bid = round(pr * 0.9995, p_dp)
                         else:
                             ask_markup = 1.0006 if "SOL" in s else 1.0005
                             bid_markdown = 0.9994 if "SOL" in s else 0.9995
-                            rev_ask = round(pr * ask_markup, 2)
-                            rev_bid = round(pr * bid_markdown, 2)
+                            rev_ask = round(pr * ask_markup, p_dp)
+                            rev_bid = round(pr * bid_markdown, p_dp)
 
                         disloc = round(((pr - rev_ask) / rev_ask) * 100.0, 3) if rev_ask > 0 else 0.0
                         lead_ms = int(sn_data.get("average_lead_ms", 450)) if sn_data else 450
-                        spread_gbp = round(rev_ask - rev_bid, 2)
+                        spread_gbp = round(rev_ask - rev_bid, p_dp)
                         spread_pct = round(((rev_ask - rev_bid) / rev_bid) * 100.0, 3) if rev_bid > 0 else 0.0
 
                         return {
@@ -493,6 +494,7 @@ class TradingEngineCoordinator:
                     "engine_activity": engine_activity,
                     "engine_decisions": engine_decisions,
                     "resting_orders": active_orders,
+                    "active_orders": active_orders,
                     "resting_orders_count": len(active_orders),
                     "live_trades": live_trades,
                     "timestamp": int(time.time()),
