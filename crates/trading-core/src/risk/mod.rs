@@ -315,15 +315,34 @@ impl CentralRiskEngine {
 
     /// Releases locked order capital upon fill completion so envelopes rotate properly
     pub async fn settle_fill(&self, fill: &crate::model::Fill) {
-        let (currency, amount) = match fill.side {
-            OrderSide::Buy => (&fill.symbol.quote, (fill.price * fill.qty).round_dp(2)),
-            OrderSide::Sell => (&fill.symbol.base, fill.qty),
-        };
-
         let mut envelopes = self.envelopes.lock().await;
-        let key = format!("{}:{}", fill.runner_id, currency);
-        if let Some(env) = envelopes.get_mut(&key) {
-            env.unlock(amount);
+
+        match fill.side {
+            OrderSide::Buy => {
+                let key = format!("{}:{}", fill.runner_id, fill.symbol.quote);
+                if let Some(env) = envelopes.get_mut(&key) {
+                    let amount = (fill.price * fill.qty).round_dp(2);
+                    env.unlock(amount);
+                }
+            }
+            OrderSide::Sell => {
+                let base_key = format!("{}:{}", fill.runner_id, fill.symbol.base);
+                if let Some(env) = envelopes.get_mut(&base_key) {
+                    env.unlock(fill.qty);
+                }
+
+                // SELL fill returns quote currency proceeds (e.g. GBP) into the runner's quote envelope
+                let quote_key = format!("{}:{}", fill.runner_id, fill.symbol.quote);
+                let quote_proceeds = (fill.price * fill.qty).round_dp(2);
+                if let Some(env) = envelopes.get_mut(&quote_key) {
+                    env.available += quote_proceeds;
+                    env.allocated += quote_proceeds;
+                    info!(
+                        "[RISK-SETTLE] Credited {:.2} {} back to envelope {} from SELL fill {}",
+                        quote_proceeds, fill.symbol.quote, quote_key, fill.client_order_id
+                    );
+                }
+            }
         }
     }
 
@@ -413,6 +432,35 @@ mod tests {
         let env = risk.get_envelope(runner_id, "GBP").await.unwrap();
         assert_eq!(env.available, dec!(0.0), "All remaining available capital should be locked");
         assert_eq!(env.locked, dec!(15.52993406));
+    }
+
+    #[tokio::test]
+    async fn test_risk_engine_settle_fill_on_sell_credits_quote_envelope() {
+        let risk = CentralRiskEngine::new(dec!(0.05), dec!(0.006));
+        let runner_id = "runner_xrp_gbp";
+
+        // Register small £2.00 initial quote envelope
+        risk.register_envelope(runner_id, "GBP", dec!(2.00)).await;
+
+        // Spot sell fill occurs: 12.4 XRP @ £1.15 = £14.26 GBP proceeds
+        let sell_fill = crate::model::Fill {
+            order_id: uuid::Uuid::new_v4(),
+            client_order_id: "test-sell-fill".to_string(),
+            runner_id: runner_id.to_string(),
+            symbol: Symbol::new("XRP", "GBP"),
+            side: OrderSide::Sell,
+            price: dec!(1.15),
+            qty: dec!(12.4),
+            fee: dec!(0.0),
+            timestamp: chrono::Utc::now(),
+        };
+
+        risk.settle_fill(&sell_fill).await;
+
+        let env_after = risk.get_envelope(runner_id, "GBP").await.unwrap();
+        // Envelope should now have £2.00 + £14.26 = £16.26 available!
+        assert_eq!(env_after.available, dec!(16.26));
+        assert_eq!(env_after.allocated, dec!(16.26));
     }
 }
 
