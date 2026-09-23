@@ -89,12 +89,13 @@ async fn main() -> anyhow::Result<()> {
         // Verify live credentials and balances
         match client_arc.get_balances().await {
             Ok(bals) => {
-                info!("✅ [LIVE AUTH SUCCESS] Revolut X Balances: GBP: £{:.2}, USD: ${:.2}, BTC: {:.6}, ETH: {:.6}, SOL: {:.4}",
+                info!("✅ [LIVE AUTH SUCCESS] Revolut X Balances: GBP: £{:.2}, USD: ${:.2}, BTC: {:.6}, ETH: {:.6}, SOL: {:.4}, XRP: {:.4}",
                     bals.get("GBP").unwrap_or(&rust_decimal::Decimal::ZERO),
                     bals.get("USD").unwrap_or(&rust_decimal::Decimal::ZERO),
                     bals.get("BTC").unwrap_or(&rust_decimal::Decimal::ZERO),
                     bals.get("ETH").unwrap_or(&rust_decimal::Decimal::ZERO),
-                    bals.get("SOL").unwrap_or(&rust_decimal::Decimal::ZERO)
+                    bals.get("SOL").unwrap_or(&rust_decimal::Decimal::ZERO),
+                    bals.get("XRP").unwrap_or(&rust_decimal::Decimal::ZERO)
                 );
             }
             Err(e) => {
@@ -200,13 +201,14 @@ async fn main() -> anyhow::Result<()> {
             let cb_tripped = risk_heartbeat.is_circuit_breaker_tripped().await;
 
             info!(
-                "[HEARTBEAT] Mode: {} | Balances: [GBP: £{:.2}, USD: ${:.2}, BTC: {:.6}, ETH: {:.6}, SOL: {:.4}] | Active Orders: {} | Circuit Breaker: {}",
+                "[HEARTBEAT] Mode: {} | Balances: [GBP: £{:.2}, USD: ${:.2}, BTC: {:.6}, ETH: {:.6}, SOL: {:.4}, XRP: {:.4}] | Active Orders: {} | Circuit Breaker: {}",
                 mode_str,
                 bals.get("GBP").unwrap_or(&dec!(0.0)),
                 bals.get("USD").unwrap_or(&dec!(0.0)),
                 bals.get("BTC").unwrap_or(&dec!(0.0)),
                 bals.get("ETH").unwrap_or(&dec!(0.0)),
                 bals.get("SOL").unwrap_or(&dec!(0.0)),
+                bals.get("XRP").unwrap_or(&dec!(0.0)),
                 resting.len(),
                 if cb_tripped { "TRIPPED" } else { "NORMAL" }
             );

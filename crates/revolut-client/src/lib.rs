@@ -107,14 +107,26 @@ impl LiveRevolutClient {
             vec![]
         };
 
+        let base_size_str = if order.symbol.base == "XRP" {
+            format!("{:.5}", order.qty)
+        } else {
+            format!("{:.8}", order.qty)
+        };
+
+        let price_str = if order.price < Decimal::from(10) {
+            format!("{:.4}", order.price)
+        } else {
+            format!("{:.2}", order.price)
+        };
+
         let payload = RevolutOrderPayload {
             client_order_id: order.client_order_id.clone(),
             symbol: order.symbol.as_dash(),
             side: order.side.to_string().to_uppercase(),
             order_configuration: OrderConfiguration {
                 limit: LimitConfiguration {
-                    base_size: format!("{:.8}", order.qty),
-                    price: format!("{:.2}", order.price),
+                    base_size: base_size_str,
+                    price: price_str,
                     execution_instructions,
                 },
             },

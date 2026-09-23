@@ -395,12 +395,26 @@ impl RunnerManager {
                             let sell_price = if let Ok((best_bid, _)) = self.execution_client.get_bbo(&handle.config.symbol).await {
                                 if best_bid > dec!(0.0) {
                                     // 2% discount below top bid ensures immediate aggressive taker fill
-                                    (best_bid * dec!(0.98)).round_dp(2)
+                                    if best_bid < dec!(10.0) {
+                                        (best_bid * dec!(0.98)).round_dp(4)
+                                    } else {
+                                        (best_bid * dec!(0.98)).round_dp(2)
+                                    }
+                                } else if handle.config.symbol.base == "XRP" {
+                                    dec!(0.0001)
                                 } else {
                                     dec!(0.01)
                                 }
+                            } else if handle.config.symbol.base == "XRP" {
+                                dec!(0.0001)
                             } else {
                                 dec!(0.01)
+                            };
+
+                            let sell_qty = if handle.config.symbol.base == "XRP" {
+                                qty.round_dp(5)
+                            } else {
+                                *qty
                             };
 
                             let order = trading_core::model::Order::new_limit_taker(
@@ -408,9 +422,9 @@ impl RunnerManager {
                                 handle.config.symbol.clone(),
                                 trading_core::model::OrderSide::Sell,
                                 sell_price,
-                                *qty,
+                                sell_qty,
                             );
-                            info!("[LIQUIDATE-DISPATCH] [{}] Submitting taker liquidation sell for {} {} @ £{}", handle.grid_runner_id, qty, handle.config.symbol, sell_price);
+                            info!("[LIQUIDATE-DISPATCH] [{}] Submitting taker liquidation sell for {} {} @ £{}", handle.grid_runner_id, sell_qty, handle.config.symbol, sell_price);
                             match self.execution_client.submit_taker_order(&order).await {
                                 Ok(filled) => info!("[LIQUIDATE-FILLED] [{}] Market liquidated: {} {} @ £{}", handle.grid_runner_id, filled.qty, handle.config.symbol, filled.price),
                                 Err(e) => {

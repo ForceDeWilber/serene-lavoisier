@@ -16,6 +16,7 @@ export function PortfolioPane({ telemetry, onSyncRevolut, syncingRevolut }: Prop
   const btcBalance = toNum(telemetry?.balances?.BTC, 0);
   const ethBalance = toNum(telemetry?.balances?.ETH, 0);
   const solBalance = toNum(telemetry?.balances?.SOL, 0);
+  const xrpBalance = toNum(telemetry?.balances?.XRP, 0);
 
   const portfolio = telemetry?.portfolio;
   const capital = telemetry?.capital_management;
@@ -260,9 +261,13 @@ export function PortfolioPane({ telemetry, onSyncRevolut, syncingRevolut }: Prop
                 <td className="text-left p-1 pl-2">ETH</td>
                 <td className="p-1 pr-2">{formatNum(ethBalance, 6)}</td>
               </tr>
-              <tr>
+              <tr className="border-b border-gray-800/50">
                 <td className="text-left p-1 pl-2">SOL</td>
                 <td className="p-1 pr-2">{formatNum(solBalance, 4)}</td>
+              </tr>
+              <tr>
+                <td className="text-left p-1 pl-2">XRP</td>
+                <td className="p-1 pr-2">{formatNum(xrpBalance, 2)}</td>
               </tr>
             </tbody>
           </table>

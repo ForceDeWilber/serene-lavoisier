@@ -24,6 +24,7 @@ class CapitalManager:
             "BTC": 0.0,
             "ETH": 0.0,
             "SOL": 0.0,
+            "XRP": 0.0,
         }
 
         # Dynamic Profit Lock Configuration
@@ -144,6 +145,7 @@ class CapitalManager:
             self.crypto_balances["BTC"] = live_res.get("BTC", self.crypto_balances["BTC"])
             self.crypto_balances["ETH"] = live_res.get("ETH", self.crypto_balances["ETH"])
             self.crypto_balances["SOL"] = live_res.get("SOL", self.crypto_balances.get("SOL", 0.0))
+            self.crypto_balances["XRP"] = live_res.get("XRP", self.crypto_balances.get("XRP", 0.0))
             logger.info(f"Auto-detected Revolut X live balances: GBP £{self.settled_cash_gbp:,.2f}")
             return {
                 "status": "success",
@@ -153,6 +155,7 @@ class CapitalManager:
                     "BTC": self.crypto_balances["BTC"],
                     "ETH": self.crypto_balances["ETH"],
                     "SOL": self.crypto_balances["SOL"],
+                    "XRP": self.crypto_balances["XRP"],
                 },
             }
 
@@ -165,6 +168,7 @@ class CapitalManager:
                 "BTC": self.crypto_balances["BTC"],
                 "ETH": self.crypto_balances["ETH"],
                 "SOL": self.crypto_balances["SOL"],
+                "XRP": self.crypto_balances["XRP"],
             },
         }
 
@@ -246,6 +250,7 @@ class CapitalManager:
             "USD": 0.7513, # Fallback baseline FX
             "EUR": 0.8500, # Fallback baseline FX
             "SOL": 85.0,
+            "XRP": 1.18,
             "BTC": 60000.0,
             "ETH": 2000.0,
         }
@@ -263,6 +268,8 @@ class CapitalManager:
                         if sym and price > 0:
                             tickers[sym] = price
 
+                    if "XRP/GBP" in tickers:
+                        rates["XRP"] = tickers["XRP/GBP"]
                     if "SOL/GBP" in tickers:
                         rates["SOL"] = tickers["SOL/GBP"]
                     if "BTC/GBP" in tickers:
@@ -270,8 +277,10 @@ class CapitalManager:
                     if "ETH/GBP" in tickers:
                         rates["ETH"] = tickers["ETH/GBP"]
 
-                    # Compute live USD/GBP cross-rate from SOL/GBP and SOL/USD
-                    if "SOL/GBP" in tickers and "SOL/USD" in tickers and tickers["SOL/USD"] > 0:
+                    # Compute live USD/GBP cross-rate from crypto pairs
+                    if "XRP/GBP" in tickers and "XRP/USD" in tickers and tickers["XRP/USD"] > 0:
+                        rates["USD"] = round(tickers["XRP/GBP"] / tickers["XRP/USD"], 4)
+                    elif "SOL/GBP" in tickers and "SOL/USD" in tickers and tickers["SOL/USD"] > 0:
                         rates["USD"] = round(tickers["SOL/GBP"] / tickers["SOL/USD"], 4)
                     elif "BTC/GBP" in tickers and "BTC/USD" in tickers and tickers["BTC/USD"] > 0:
                         rates["USD"] = round(tickers["BTC/GBP"] / tickers["BTC/USD"], 4)

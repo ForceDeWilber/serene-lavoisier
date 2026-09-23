@@ -123,7 +123,7 @@ impl GeometricGridStrategy {
                 }
 
                 current_buy_multiplier *= one - dynamic_step;
-                let rung_price = (effective_center * current_buy_multiplier).round_dp(2);
+                let rung_price = round_price_for(effective_center * current_buy_multiplier);
                 if rung_price <= Decimal::ZERO {
                     continue;
                 }
@@ -133,18 +133,19 @@ impl GeometricGridStrategy {
                     break;
                 }
 
-                let mut qty = (rung_clip / rung_price).round_dp(6);
+                let qty_dp = if self.config.symbol.base == "XRP" { 5 } else { 6 };
+                let step = if self.config.symbol.base == "XRP" { dec!(0.00001) } else { dec!(0.000001) };
+                let mut qty = (rung_clip / rung_price).round_dp(qty_dp);
                 if qty <= Decimal::ZERO {
                     continue;
                 }
 
-                // If rounding qty to 6 dp caused notional to drop below min_clip, try bumping by smallest step if fiat allows
-                let step = dec!(0.000001);
+                // If rounding qty caused notional to drop below min_clip, try bumping by smallest step if fiat allows
                 while (qty * rung_price).round_dp(2) < min_clip && (qty + step) * rung_price <= remaining_fiat {
                     qty += step;
                 }
 
-                // If rounding qty to 6 dp caused notional to exceed remaining fiat, decrement to stay within budget
+                // If rounding qty caused notional to exceed remaining fiat, decrement to stay within budget
                 while qty * rung_price > remaining_fiat && qty > step {
                     qty -= step;
                 }
@@ -183,12 +184,12 @@ impl GeometricGridStrategy {
 
                 // Strict No-Loss Floor: Ensure sell price is at or above cost basis (+0.15% minimum profit margin)
                 let min_profit_multiplier = dec!(1.0015);
-                let floor_price = self.config.cost_basis.map(|cb| (cb * min_profit_multiplier).round_dp(2));
+                let floor_price = self.config.cost_basis.map(|cb| round_price_for(cb * min_profit_multiplier));
                 let min_profit_floor_fiat = dec!(0.01);
 
                 for _ in 1..=self.config.rungs_per_side {
                     current_sell_multiplier *= one + dynamic_step;
-                    let mut rung_price = (effective_center * current_sell_multiplier).round_dp(2);
+                    let mut rung_price = round_price_for(effective_center * current_sell_multiplier);
 
                     if let Some(floor) = floor_price {
                         if rung_price < floor {
@@ -200,7 +201,8 @@ impl GeometricGridStrategy {
                         continue;
                     }
 
-                    let desired_qty = (sell_clip / rung_price).round_dp(6);
+                    let qty_dp = if self.config.symbol.base == "XRP" { 5 } else { 6 };
+                    let desired_qty = (sell_clip / rung_price).round_dp(qty_dp);
                     let remaining_base = base_avail - allocated_sell_base;
                     if remaining_base <= Decimal::ZERO {
                         break;
@@ -213,9 +215,10 @@ impl GeometricGridStrategy {
 
                     // Guarantee each sell rung yields at least £0.01 gross profit above cost basis (if set) or effective center
                     let reference_price = self.config.cost_basis.unwrap_or(effective_center);
+                    let (scale_factor, min_tick) = price_scale_and_tick(reference_price);
                     let raw_delta = min_profit_floor_fiat / qty;
-                    let required_delta = (raw_delta * dec!(100.0)).ceil() / dec!(100.0);
-                    let penny_floor = reference_price + required_delta.max(dec!(0.01));
+                    let required_delta = (raw_delta * scale_factor).ceil() / scale_factor;
+                    let penny_floor = reference_price + required_delta.max(min_tick);
                     if rung_price < penny_floor {
                         rung_price = penny_floor;
                     }
@@ -226,8 +229,8 @@ impl GeometricGridStrategy {
                             let sweep_qty = remaining_base;
                             allocated_sell_base += sweep_qty;
                             let sweep_raw_delta = min_profit_floor_fiat / sweep_qty;
-                            let sweep_required_delta = (sweep_raw_delta * dec!(100.0)).ceil() / dec!(100.0);
-                            let sweep_penny_floor = reference_price + sweep_required_delta.max(dec!(0.01));
+                            let sweep_required_delta = (sweep_raw_delta * scale_factor).ceil() / scale_factor;
+                            let sweep_penny_floor = reference_price + sweep_required_delta.max(min_tick);
                             let sweep_price = rung_price.max(sweep_penny_floor);
 
                             let order = Order::new_limit_post_only(
@@ -273,14 +276,15 @@ impl GeometricGridStrategy {
             OrderSide::Buy => {
                 self.inventory_base += fill.qty;
                 // Place counter SELL order 1 dynamic step above fill price
-                let mut counter_price = (fill.price * (one + dynamic_step)).round_dp(2);
+                let mut counter_price = round_price_for(fill.price * (one + dynamic_step));
 
                 // Hard Penny Evaporation Shield:
                 // Ensure the gross profit (counter_price - fill.price) * fill.qty is at least £0.01 (1 penny).
                 if fill.qty > Decimal::ZERO {
+                    let (scale_factor, min_tick) = price_scale_and_tick(fill.price);
                     let raw_delta = min_profit_floor_fiat / fill.qty;
-                    let required_delta = (raw_delta * dec!(100.0)).ceil() / dec!(100.0);
-                    let min_viable_price = fill.price + required_delta.max(dec!(0.01));
+                    let required_delta = (raw_delta * scale_factor).ceil() / scale_factor;
+                    let min_viable_price = fill.price + required_delta.max(min_tick);
                     if counter_price < min_viable_price {
                         info!(
                             "[{}] Penny Evaporation Shield: bumping counter SELL price from £{} to £{} (guarantee >= £0.01 profit on qty {})",
@@ -325,11 +329,12 @@ impl GeometricGridStrategy {
 
                 // Place counter BUY order 1 dynamic step below fill price,
                 // also respecting penny shield so the buy-back discount earns at least 1 penny.
-                let mut counter_price = (fill.price * (one - dynamic_step)).round_dp(2);
+                let mut counter_price = round_price_for(fill.price * (one - dynamic_step));
                 if fill.qty > Decimal::ZERO {
+                    let (scale_factor, min_tick) = price_scale_and_tick(fill.price);
                     let raw_delta = min_profit_floor_fiat / fill.qty;
-                    let required_delta = (raw_delta * dec!(100.0)).ceil() / dec!(100.0);
-                    let max_viable_buy = fill.price - required_delta.max(dec!(0.01));
+                    let required_delta = (raw_delta * scale_factor).ceil() / scale_factor;
+                    let max_viable_buy = fill.price - required_delta.max(min_tick);
                     if counter_price > max_viable_buy && max_viable_buy > Decimal::ZERO {
                         info!(
                             "[{}] Penny Evaporation Shield: lowering counter BUY price from £{} to £{} (guarantee >= £0.01 discount on qty {})",
@@ -401,3 +406,27 @@ impl GeometricGridStrategy {
         )
     }
 }
+
+#[inline]
+pub fn price_decimals_for(price: Decimal) -> u32 {
+    if price < dec!(10.0) {
+        4
+    } else {
+        2
+    }
+}
+
+#[inline]
+pub fn round_price_for(price: Decimal) -> Decimal {
+    price.round_dp(price_decimals_for(price))
+}
+
+#[inline]
+pub fn price_scale_and_tick(price: Decimal) -> (Decimal, Decimal) {
+    if price < dec!(10.0) {
+        (dec!(10000.0), dec!(0.0001))
+    } else {
+        (dec!(100.0), dec!(0.01))
+    }
+}
+

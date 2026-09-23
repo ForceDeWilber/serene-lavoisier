@@ -14,7 +14,11 @@ export const OrderLadderCard: React.FC<OrderLadderCardProps> = ({ telemetry }) =
   const activeOrders = telemetry?.active_orders || telemetry?.resting_orders || [];
   const trades = telemetry?.trades || telemetry?.live_trades || [];
 
-  const midPrice = toNum(runner?.effective_center ?? runner?.center_price, 88.52);
+  const midPrice = toNum(runner?.effective_center ?? runner?.center_price, 0);
+  const assetSymbol = runner?.symbol?.split("/")[0] || "XRP";
+  const isSubTen = midPrice < 10 && midPrice > 0;
+  const priceDecimals = isSubTen ? 4 : 2;
+  const qtyDecimals = assetSymbol === "XRP" ? 2 : 4;
 
   // Split orders into SELLs (above mid) and BUYs (below mid)
   const sellOrders = activeOrders
@@ -52,11 +56,11 @@ export const OrderLadderCard: React.FC<OrderLadderCardProps> = ({ telemetry }) =
             >
               <div className="flex items-center gap-1.5 text-rose-400 font-medium">
                 <ArrowUpRight className="w-3.5 h-3.5" />
-                <span>SELL @ {formatGbp(toNum(ord.price, 0), 2)}</span>
+                <span>SELL @ {formatGbp(toNum(ord.price, 0), toNum(ord.price, 0) < 10 ? 4 : 2)}</span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-slate-400 text-[10px] font-mono">
-                  {toNum(ord.qty, 0).toFixed(4)} SOL
+                  {toNum(ord.qty, 0).toFixed(qtyDecimals)} {assetSymbol}
                 </span>
                 <span className="font-bold text-rose-300 font-sans">
                   {formatGbp(toNum(ord.value_gbp, 0), 2)}
@@ -79,7 +83,7 @@ export const OrderLadderCard: React.FC<OrderLadderCardProps> = ({ telemetry }) =
             </span>
           </div>
           <span className="text-base font-bold font-sans text-white">
-            {formatGbp(midPrice, 2)}
+            {formatGbp(midPrice, priceDecimals)}
           </span>
         </div>
 
@@ -91,11 +95,11 @@ export const OrderLadderCard: React.FC<OrderLadderCardProps> = ({ telemetry }) =
           >
             <div className="flex items-center gap-1.5 text-sky-400 font-medium">
               <ArrowDownRight className="w-3.5 h-3.5" />
-              <span>BUY @ {formatGbp(toNum(ord.price, 0), 2)}</span>
+              <span>BUY @ {formatGbp(toNum(ord.price, 0), toNum(ord.price, 0) < 10 ? 4 : 2)}</span>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-slate-400 text-[10px] font-mono">
-                {toNum(ord.qty, 0).toFixed(4)} SOL
+                {toNum(ord.qty, 0).toFixed(qtyDecimals)} {assetSymbol}
               </span>
               <span className="font-bold text-sky-300 font-sans">
                 {formatGbp(toNum(ord.value_gbp, 0), 2)}
@@ -122,6 +126,7 @@ export const OrderLadderCard: React.FC<OrderLadderCardProps> = ({ telemetry }) =
             recentFills.map((trade) => {
               const isSell = trade.side === "SELL";
               const profit = toNum(trade.profit ?? trade.pnl_gbp, 0);
+              const tPrice = toNum(trade.price, 0);
               return (
                 <div
                   key={trade.id}
@@ -138,7 +143,7 @@ export const OrderLadderCard: React.FC<OrderLadderCardProps> = ({ telemetry }) =
                       {trade.side}
                     </span>
                     <span className="text-slate-300 font-medium">
-                      {formatGbp(toNum(trade.price, 0), 2)}
+                      {formatGbp(tPrice, tPrice < 10 ? 4 : 2)}
                     </span>
                   </div>
                   <div className="flex items-center gap-2">

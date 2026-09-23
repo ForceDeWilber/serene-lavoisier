@@ -156,7 +156,11 @@ impl DynamicPriceModel {
             .min(self.config.max_inventory_skew_pct);
 
         let reservation = mid_price * (dec!(1.0) - skew_pct);
-        reservation.round_dp(2)
+        if mid_price < dec!(10.0) {
+            reservation.round_dp(4)
+        } else {
+            reservation.round_dp(2)
+        }
     }
 
     /// Slices available free capital into dynamic rung clips

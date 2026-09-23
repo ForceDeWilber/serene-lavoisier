@@ -12,16 +12,16 @@ interface OracleRadarCardProps {
 export const OracleRadarCard: React.FC<OracleRadarCardProps> = ({ telemetry }) => {
   const runner = telemetry?.runners?.[0];
   const sniper = telemetry?.sniper;
-  const radarItem = sniper?.radar?.["SOL/GBP"] || (sniper?.radar ? Object.values(sniper.radar)[0] : undefined);
+  const radarItem = sniper?.radar?.["XRP/GBP"] || sniper?.radar?.["SOL/GBP"] || (sniper?.radar ? Object.values(sniper.radar)[0] : undefined);
 
-  const revolutMid = toNum(runner?.effective_center ?? runner?.center_price, 88.52);
-  const binancePrice = toNum(radarItem?.kraken_price, revolutMid + 0.03); // Dual oracle lead price
+  const revolutMid = toNum(runner?.effective_center ?? runner?.center_price, 0);
+  const binancePrice = toNum(radarItem?.kraken_price, revolutMid > 0 ? revolutMid : 0); // Dual oracle lead price
   const dislocationPct = toNum(
     radarItem?.current_dislocation_pct,
-    ((binancePrice - revolutMid) / Math.max(0.01, revolutMid)) * 100
+    revolutMid > 0 ? ((binancePrice - revolutMid) / revolutMid) * 100 : 0
   );
 
-  const stepPct = toNum(runner?.dynamic_step_pct ?? runner?.step_pct, 0.0009) * 100;
+  const stepPct = toNum(runner?.dynamic_step_pct ?? runner?.step_pct, 0.0035) * 100;
   const isCircuitBreakerNormal = !telemetry?.circuit_breaker_tripped;
 
   return (
@@ -47,7 +47,7 @@ export const OracleRadarCard: React.FC<OracleRadarCardProps> = ({ telemetry }) =
             <span className="text-sky-400 text-[9px] font-mono">LEAD</span>
           </div>
           <div className="text-lg font-bold text-sky-300 font-sans mt-0.5">
-            {formatGbp(binancePrice, 2)}
+            {formatGbp(binancePrice, binancePrice < 10 ? 4 : 2)}
           </div>
           <div className="text-[10px] text-slate-400">Real-time Stream</div>
         </div>
@@ -59,7 +59,7 @@ export const OracleRadarCard: React.FC<OracleRadarCardProps> = ({ telemetry }) =
             <span className="text-slate-400 text-[9px] font-mono">VENUE</span>
           </div>
           <div className="text-lg font-bold text-slate-100 font-sans mt-0.5">
-            {formatGbp(revolutMid, 2)}
+            {formatGbp(revolutMid, revolutMid < 10 ? 4 : 2)}
           </div>
           <div className="text-[10px] text-slate-400">Resting Center</div>
         </div>

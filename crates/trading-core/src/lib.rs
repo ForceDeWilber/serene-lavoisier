@@ -403,5 +403,59 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_xrp_sub_penny_grid_precision() {
+        let config = GridConfig {
+            runner_id: "test_xrp_runner".into(),
+            symbol: Symbol::xrp_gbp(),
+            step_pct: dec!(0.0035), // 0.35%
+            rungs_per_side: 5,
+            order_size_gbp: dec!(15.0),
+            rebalance_threshold_pct: dec!(0.012),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: None,
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+        let center = dec!(1.1830);
+
+        // £75 free cash, 0 XRP inventory
+        let orders = strategy.initialize_grid(center, Some(dec!(75.0)), Some(dec!(0.0)));
+        let buys: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Buy).collect();
+        assert_eq!(buys.len(), 5, "Expected 5 buy rungs on XRP");
+
+        // Verify rungs have 4 decimal places and proper sub-penny increments
+        for b in &buys {
+            assert!(b.price.scale() <= 4, "XRP buy price {} exceeded 4 decimal places", b.price);
+            assert!(b.qty.scale() <= 5, "XRP buy qty {} exceeded 5 decimal places", b.qty);
+            assert!(b.price < center, "Buy rung should be below center price");
+        }
+
+        // Test counter sell generation with Penny Shield on small price asset
+        let fill = Fill {
+            runner_id: "test_xrp_runner".into(),
+            order_id: buys[0].id,
+            client_order_id: buys[0].client_order_id.clone(),
+            symbol: Symbol::xrp_gbp(),
+            side: OrderSide::Buy,
+            price: dec!(1.1800),
+            qty: dec!(12.71186),
+            fee: rust_decimal::Decimal::ZERO,
+            timestamp: Utc::now(),
+        };
+
+        let counter_sell = strategy.on_fill(&fill).expect("Expected counter sell");
+        assert_eq!(counter_sell.side, OrderSide::Sell);
+        assert!(counter_sell.price.scale() <= 4, "Counter sell price {} exceeded 4 decimal places", counter_sell.price);
+        assert!(counter_sell.qty.scale() <= 5, "Counter sell qty {} exceeded 5 decimal places", counter_sell.qty);
+        // Gross profit must be at least £0.01
+        let gross_profit = (counter_sell.price - fill.price) * fill.qty;
+        assert!(gross_profit >= dec!(0.01), "Gross profit £{} was less than 1 penny guarantee", gross_profit);
+    }
 }
+
 
