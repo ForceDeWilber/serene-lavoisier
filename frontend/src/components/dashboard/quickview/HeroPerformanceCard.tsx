@@ -23,20 +23,20 @@ export const HeroPerformanceCard: React.FC<HeroPerformanceCardProps> = ({ teleme
       portfolio?.net_deposited_cash_gbp ??
       portfolio?.total_deposited_cash_gbp ??
       portfolio?.initial_budget_gbp,
-    79.18
+    0
   );
   const realizedPnL = toNum(
     portfolio?.total_realized_pnl_gbp ?? telemetry?.capital_management?.cumulative_profit_gbp,
-    1.6594
+    0
   );
-  const realizedPct = depositedCash > 0 ? (realizedPnL / depositedCash) * 100 : 2.1;
+  const realizedPct = depositedCash > 0 ? (realizedPnL / depositedCash) * 100 : 0;
   const netPnLGbp = currentEquity - depositedCash;
   const netPnLPct = depositedCash > 0 ? (netPnLGbp / depositedCash) * 100 : 0;
 
   // Generate 24H performance trajectory points around current equity and realized gains
   const chartData = useMemo(() => {
-    const curEq = currentEquity > 0 ? currentEquity : 77.07;
-    const curPnl = realizedPnL > 0 ? realizedPnL : 3.98;
+    const curEq = currentEquity > 0 ? currentEquity : 0;
+    const curPnl = realizedPnL > 0 ? realizedPnL : 0;
     const base = [
       { time: "12:00", equity: curEq - 0.55, realized: Math.max(0, curPnl - 0.90) },
       { time: "15:00", equity: curEq - 0.30, realized: Math.max(0, curPnl - 0.82) },

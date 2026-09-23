@@ -46,13 +46,12 @@ class CapitalManager:
         self.revolut_base_url: str = os.getenv("REVOLUT_BASE_URL", "https://revx.revolut.com")
 
         # Auto Smart Detection of Transfers (In & Out of Account)
-        # Includes initial pre-bot account funding / crypto transfer basis (£44.18) + fiat deposits (£35.00) = £79.18
-        self.initial_baseline_funding_gbp: float = 44.18
         self.deposits: list = []
         self.withdrawals: list = []
-        self.total_deposits_gbp: float = 79.18
+        self.total_deposits_gbp: float = 0.0
         self.total_withdrawals_gbp: float = 0.0
-        self.net_deposited_cash_gbp: float = 79.18
+        self.net_deposited_cash_gbp: float = 0.0
+        self.last_scanned_tx_timestamp: int = 0
         self.last_audit_timestamp: int = 0
         self.last_audit_status: str = "PENDING"
         self._audit_lock: Optional[Any] = None
@@ -64,8 +63,6 @@ class CapitalManager:
             if STATE_FILE.exists():
                 with open(STATE_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    if "initial_baseline_funding_gbp" in data:
-                        self.initial_baseline_funding_gbp = float(data["initial_baseline_funding_gbp"])
                     if "total_deposited_cash_gbp" in data:
                         self.total_deposited_cash_gbp = float(data["total_deposited_cash_gbp"])
                         self.starting_balance_gbp = self.total_deposited_cash_gbp
@@ -84,6 +81,8 @@ class CapitalManager:
                         self.deposits = data["deposits"]
                     if "withdrawals" in data and isinstance(data["withdrawals"], list):
                         self.withdrawals = data["withdrawals"]
+                    if "last_scanned_tx_timestamp" in data:
+                        self.last_scanned_tx_timestamp = int(data["last_scanned_tx_timestamp"])
                     if "last_audit_timestamp" in data:
                         self.last_audit_timestamp = int(data["last_audit_timestamp"])
                     if "last_audit_status" in data:
@@ -111,7 +110,6 @@ class CapitalManager:
     def _save_state(self):
         try:
             data = {
-                "initial_baseline_funding_gbp": self.initial_baseline_funding_gbp,
                 "total_deposited_cash_gbp": self.total_deposited_cash_gbp,
                 "starting_balance_gbp": self.starting_balance_gbp,
                 "net_deposited_cash_gbp": self.net_deposited_cash_gbp,
@@ -119,6 +117,7 @@ class CapitalManager:
                 "total_withdrawals_gbp": self.total_withdrawals_gbp,
                 "deposits": self.deposits,
                 "withdrawals": self.withdrawals,
+                "last_scanned_tx_timestamp": self.last_scanned_tx_timestamp,
                 "last_audit_timestamp": self.last_audit_timestamp,
                 "last_audit_status": self.last_audit_status,
                 "profit_lock_pct": self.profit_lock_pct,
@@ -237,6 +236,69 @@ class CapitalManager:
             logger.error(f"Error querying Revolut X balances: {e}")
             return None
 
+    async def _get_conversion_rates(self, client: httpx.AsyncClient) -> Dict[str, float]:
+        """
+        Dynamically fetches live ticker quotes from Revolut X to convert non-GBP deposits/withdrawals.
+        Returns exchange rate or price in GBP for currencies (USD, EUR, SOL, BTC, ETH, etc.).
+        """
+        rates: Dict[str, float] = {
+            "GBP": 1.0,
+            "USD": 0.7513, # Fallback baseline FX
+            "EUR": 0.8500, # Fallback baseline FX
+            "SOL": 85.0,
+            "BTC": 60000.0,
+            "ETH": 2000.0,
+        }
+        try:
+            headers = self._sign_request("GET", "/api/1.0/tickers")
+            if headers:
+                resp = await client.get(f"{self.revolut_base_url}/api/1.0/tickers", headers=headers, timeout=5.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tickers_list = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                    tickers: Dict[str, float] = {}
+                    for t in tickers_list:
+                        sym = t.get("symbol", "")
+                        price = float(t.get("mid", t.get("last_price", 0.0)) or 0.0)
+                        if sym and price > 0:
+                            tickers[sym] = price
+
+                    if "SOL/GBP" in tickers:
+                        rates["SOL"] = tickers["SOL/GBP"]
+                    if "BTC/GBP" in tickers:
+                        rates["BTC"] = tickers["BTC/GBP"]
+                    if "ETH/GBP" in tickers:
+                        rates["ETH"] = tickers["ETH/GBP"]
+
+                    # Compute live USD/GBP cross-rate from SOL/GBP and SOL/USD
+                    if "SOL/GBP" in tickers and "SOL/USD" in tickers and tickers["SOL/USD"] > 0:
+                        rates["USD"] = round(tickers["SOL/GBP"] / tickers["SOL/USD"], 4)
+                    elif "BTC/GBP" in tickers and "BTC/USD" in tickers and tickers["BTC/USD"] > 0:
+                        rates["USD"] = round(tickers["BTC/GBP"] / tickers["BTC/USD"], 4)
+                    elif "ETH/GBP" in tickers and "ETH/USD" in tickers and tickers["ETH/USD"] > 0:
+                        rates["USD"] = round(tickers["ETH/GBP"] / tickers["ETH/USD"], 4)
+
+                    # Compute live EUR/GBP cross-rate if EUR pairs present
+                    if "EUR/GBP" in tickers:
+                        rates["EUR"] = tickers["EUR/GBP"]
+                    elif "SOL/GBP" in tickers and "SOL/EUR" in tickers and tickers["SOL/EUR"] > 0:
+                        rates["EUR"] = round(tickers["SOL/GBP"] / tickers["SOL/EUR"], 4)
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch live conversion rates for audit, using fallbacks: {e}")
+
+        return rates
+
+    def _convert_to_gbp(self, amount: float, currency: str, rates: Dict[str, float]) -> float:
+        """
+        Converts an incoming or outgoing transfer amount to GBP using dynamic market rates.
+        """
+        curr = currency.upper()
+        if curr == "GBP":
+            return amount
+        rate = rates.get(curr, 1.0)
+        return round(amount * rate, 2)
+
     async def audit_account_transfers(self, full_scan: bool = False) -> Dict[str, Any]:
         """
         Auto smart detection of account deposits ('receive') and withdrawals ('send').
@@ -255,11 +317,14 @@ class CapitalManager:
             cursor = None
             pages_read = 0
 
-            # If we have no deposits recorded or explicit full_scan requested, paginate fully
-            should_paginate = full_scan or len(self.deposits) == 0
+            # If full_scan or we have never scanned, scan from genesis back to the beginning of time
+            stop_timestamp = 0 if (full_scan or self.last_scanned_tx_timestamp == 0) else self.last_scanned_tx_timestamp
+            newest_tx_timestamp_seen = self.last_scanned_tx_timestamp
 
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
+                    rates = await self._get_conversion_rates(client)
+
                     while True:
                         path = "/api/1.0/transactions?limit=100"
                         if cursor:
@@ -280,12 +345,21 @@ class CapitalManager:
                         items = data.get("data", [])
                         pages_read += 1
 
-                        page_had_new_transfer = False
+                        reached_known_history = False
 
                         for tx in items:
                             tx_id = tx.get("id")
                             tx_type = tx.get("type")
                             status = tx.get("status")
+                            created_date = tx.get("created_date", 0)
+
+                            if created_date > newest_tx_timestamp_seen:
+                                newest_tx_timestamp_seen = created_date
+
+                            # If this is an incremental scan, stop once we hit transactions created before or at our last checkpoint
+                            if stop_timestamp > 0 and created_date <= stop_timestamp:
+                                reached_known_history = True
+                                break
 
                             if status != "completed" or not tx_id:
                                 continue
@@ -293,7 +367,6 @@ class CapitalManager:
                             if tx_type == "receive":
                                 if tx_id in known_deposit_ids:
                                     continue
-                                page_had_new_transfer = True
                                 dest = tx.get("destination", {})
                                 curr = dest.get("currency", "GBP").upper()
                                 try:
@@ -301,18 +374,7 @@ class CapitalManager:
                                 except (ValueError, TypeError):
                                     amount = 0.0
 
-                                # Currency conversion to GBP
-                                if curr == "GBP":
-                                    amount_gbp = amount
-                                elif curr == "USD":
-                                    # Fallback FX rate: e.g. 1.33 USD per GBP -> ~0.7518
-                                    # Specifically, the known $13.31 deposit was exactly £10.00
-                                    if tx_id == "6aac61c2-f389-aea6-bd44-9f565292a3d0" or abs(amount - 13.31) < 0.01:
-                                        amount_gbp = 10.00
-                                    else:
-                                        amount_gbp = round(amount * 0.7513, 2)
-                                else:
-                                    amount_gbp = round(amount, 2)
+                                amount_gbp = self._convert_to_gbp(amount, curr, rates)
 
                                 record = {
                                     "id": tx_id,
@@ -320,22 +382,21 @@ class CapitalManager:
                                     "status": status,
                                     "currency": curr,
                                     "amount": amount,
-                                    "amount_gbp": round(amount_gbp, 2),
-                                    "created_date": tx.get("created_date", 0),
+                                    "amount_gbp": amount_gbp,
+                                    "created_date": created_date,
                                     "processed_date": tx.get("processed_date", 0),
                                 }
                                 self.deposits.append(record)
                                 known_deposit_ids.add(tx_id)
                                 new_deposits_found += 1
                                 logger.info(
-                                    f"[CAPITAL-AUDIT] Auto-detected incoming deposit: +{amount} {curr} "
+                                    f"[CAPITAL-AUDIT] Auto-detected deposit: +{amount} {curr} "
                                     f"(£{amount_gbp:.2f} GBP) | TX: {tx_id}"
                                 )
 
                             elif tx_type == "send":
                                 if tx_id in known_withdrawal_ids:
                                     continue
-                                page_had_new_transfer = True
                                 src = tx.get("source", {})
                                 curr = src.get("currency", "GBP").upper()
                                 try:
@@ -343,12 +404,7 @@ class CapitalManager:
                                 except (ValueError, TypeError):
                                     amount = 0.0
 
-                                if curr == "GBP":
-                                    amount_gbp = amount
-                                elif curr == "USD":
-                                    amount_gbp = round(amount * 0.7513, 2)
-                                else:
-                                    amount_gbp = round(amount, 2)
+                                amount_gbp = self._convert_to_gbp(amount, curr, rates)
 
                                 record = {
                                     "id": tx_id,
@@ -356,32 +412,33 @@ class CapitalManager:
                                     "status": status,
                                     "currency": curr,
                                     "amount": amount,
-                                    "amount_gbp": round(amount_gbp, 2),
-                                    "created_date": tx.get("created_date", 0),
+                                    "amount_gbp": amount_gbp,
+                                    "created_date": created_date,
                                     "processed_date": tx.get("processed_date", 0),
                                 }
                                 self.withdrawals.append(record)
                                 known_withdrawal_ids.add(tx_id)
                                 new_withdrawals_found += 1
                                 logger.info(
-                                    f"[CAPITAL-AUDIT] Auto-detected outgoing withdrawal: -{amount} {curr} "
+                                    f"[CAPITAL-AUDIT] Auto-detected withdrawal: -{amount} {curr} "
                                     f"(£{amount_gbp:.2f} GBP) | TX: {tx_id}"
                                 )
+
+                        if reached_known_history:
+                            break
 
                         next_cursor = data.get("metadata", {}).get("next_cursor")
                         if not next_cursor or not items:
                             break
 
-                        # In incremental mode, if this page had no new transfers and we've checked the latest page, stop
-                        if not should_paginate and not page_had_new_transfer:
-                            break
-
                         cursor = next_cursor
                         await asyncio.sleep(0.05)
 
-                # Recalculate net capital cost basis including the initial baseline funding
-                fiat_deposits = round(sum(d.get("amount_gbp", 0.0) for d in self.deposits), 2) if self.deposits else 0.0
-                self.total_deposits_gbp = round(self.initial_baseline_funding_gbp + fiat_deposits, 2)
+                # Update timestamp checkpoint
+                self.last_scanned_tx_timestamp = newest_tx_timestamp_seen
+
+                # Recalculate net capital cost basis strictly from audited deposits and withdrawals
+                self.total_deposits_gbp = round(sum(d.get("amount_gbp", 0.0) for d in self.deposits), 2)
                 self.total_withdrawals_gbp = round(sum(w.get("amount_gbp", 0.0) for w in self.withdrawals), 2)
                 self.net_deposited_cash_gbp = max(0.0, round(self.total_deposits_gbp - self.total_withdrawals_gbp, 2))
 
@@ -396,7 +453,7 @@ class CapitalManager:
                 if new_deposits_found > 0 or new_withdrawals_found > 0:
                     logger.info(
                         f"[CAPITAL-AUDIT-UPDATE] Discovered {new_deposits_found} new deposits, "
-                        f"{new_withdrawals_found} new withdrawals. "
+                        f"{new_withdrawals_found} new withdrawals across {pages_read} page(s). "
                         f"Updated Cost Basis: £{self.net_deposited_cash_gbp:.2f} GBP"
                     )
 

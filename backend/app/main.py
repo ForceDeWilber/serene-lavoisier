@@ -25,11 +25,16 @@ async def start_transfer_audit_loop():
     from app.capital_manager import capital_manager
     # Initial audit after 5 seconds to let connections establish
     await asyncio.sleep(5)
+    first_run = True
     while True:
         try:
             if coordinator.mode_config == "LIVE":
                 logger.debug("Running periodic Revolut X transfer audit...")
-                await capital_manager.audit_account_transfers(full_scan=False)
+                needs_full_scan = first_run and (
+                    capital_manager.last_scanned_tx_timestamp == 0 or len(capital_manager.deposits) == 0
+                )
+                await capital_manager.audit_account_transfers(full_scan=needs_full_scan)
+                first_run = False
         except asyncio.CancelledError:
             break
         except Exception as e:

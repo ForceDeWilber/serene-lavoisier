@@ -215,7 +215,7 @@ export default function ProductionDashboard() {
       portfolio?.net_deposited_cash_gbp ??
       portfolio?.total_deposited_cash_gbp ??
       portfolio?.initial_budget_gbp,
-    35.00
+    0
   );
   const realizedPnLGbp = toNum(portfolio?.total_realized_pnl_gbp ?? telemetry?.capital_management?.cumulative_profit_gbp, 0);
   const netPnLGbp = toNum(portfolio?.total_pnl_gbp, totalEquity - depositedCash);

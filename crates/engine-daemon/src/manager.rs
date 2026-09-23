@@ -1,6 +1,7 @@
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tracing::{error, info, warn};
@@ -128,19 +129,15 @@ impl RunnerManager {
             order_size_gbp: Some(config.sniper_order_size_fiat),
         });
 
-        // 4. Create Grid Runner
-        let cost_basis = match config.symbol.base.as_str() {
-            "BTC" => {
-                if config.symbol.quote == "GBP" { Some(dec!(57019.97)) } else { Some(dec!(76350.00)) }
-            }
-            "ETH" => {
-                if config.symbol.quote == "GBP" { Some(dec!(1845.43)) } else { Some(dec!(2470.00)) }
-            }
-            "SOL" => {
-                if config.symbol.quote == "GBP" { Some(dec!(74.79)) } else { Some(dec!(100.10)) }
-            }
-            _ => None,
-        };
+        // 4. Create Grid Runner: per-asset cost basis floor override from environment (e.g. COST_BASIS_SOL_GBP=74.79)
+        let env_key = format!("COST_BASIS_{}_{}", config.symbol.base, config.symbol.quote);
+        let cost_basis = std::env::var(&env_key)
+            .ok()
+            .and_then(|v| Decimal::from_str(&v).ok());
+
+        if let Some(cb) = cost_basis {
+            info!("Configured dynamic cost basis floor for {}: £{:.2}", config.symbol.as_slash(), cb);
+        }
 
         let grid_config = GridConfig {
             runner_id: grid_id.clone(),

@@ -14,14 +14,14 @@ export const AllocationDonutCard: React.FC<AllocationDonutCardProps> = ({ teleme
   const portfolio = telemetry?.portfolio;
   const audit = portfolio?.transfer_audit || telemetry?.capital_management?.transfer_audit;
 
-  const totalEquity = toNum(portfolio?.total_equity_gbp, 75.80);
+  const totalEquity = toNum(portfolio?.total_equity_gbp, 0);
   const settledCash = toNum(
     telemetry?.capital_management?.settled_cash_gbp ?? balances?.GBP,
-    57.57
+    0
   );
   const costBasis = toNum(
     audit?.net_deposited_cash_gbp ?? portfolio?.net_deposited_cash_gbp,
-    79.18
+    0
   );
 
   // Active resting buy order capital

@@ -27,7 +27,7 @@ export function PortfolioPane({ telemetry, onSyncRevolut, syncingRevolut }: Prop
       portfolio?.net_deposited_cash_gbp ??
       portfolio?.total_deposited_cash_gbp ??
       portfolio?.initial_budget_gbp,
-    79.18
+    0
   );
 
   const realizedPnLGbp = toNum(portfolio?.total_realized_pnl_gbp ?? capital?.cumulative_profit_gbp, 0);
@@ -121,7 +121,7 @@ export function PortfolioPane({ telemetry, onSyncRevolut, syncingRevolut }: Prop
             </div>
             <div className="text-lg text-blue-300 mt-0.5">{formatGbp(depositedCash, 2)}</div>
             <div className="text-[10px] text-gray-500">
-              {audit?.deposits_count ?? 3} in • {audit?.withdrawals_count ?? 0} out
+              {audit?.deposits_count ?? 0} in • {audit?.withdrawals_count ?? 0} out
             </div>
           </div>
         </div>
