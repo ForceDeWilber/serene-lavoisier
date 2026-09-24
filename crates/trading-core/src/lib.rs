@@ -13,9 +13,11 @@ mod tests {
     use chrono::{Duration, Utc};
     use model::*;
     use risk::*;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use simulator::*;
     use strategy::*;
+    use uuid::Uuid;
 
     #[test]
     fn test_symbol_formatting() {
@@ -455,6 +457,75 @@ mod tests {
         // Gross profit must be at least £0.01
         let gross_profit = (counter_sell.price - fill.price) * fill.qty;
         assert!(gross_profit >= dec!(0.01), "Gross profit £{} was less than 1 penny guarantee", gross_profit);
+    }
+
+    #[test]
+    fn test_lot_tracking_and_no_loss_rebalance() {
+        let config = GridConfig {
+            runner_id: "test_lot_runner".into(),
+            symbol: Symbol::xrp_gbp(),
+            step_pct: dec!(0.0035),
+            rungs_per_side: 5,
+            order_size_gbp: dec!(15.0),
+            rebalance_threshold_pct: dec!(0.012),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: None,
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+
+        // 1. Initial BUY fills at £1.1800 for 12.5 XRP (£14.75)
+        let buy_fill = Fill {
+            runner_id: "test_lot_runner".into(),
+            order_id: Uuid::new_v4(),
+            client_order_id: "buy_lot_1".into(),
+            symbol: Symbol::xrp_gbp(),
+            side: OrderSide::Buy,
+            price: dec!(1.1800),
+            qty: dec!(12.5),
+            fee: Decimal::ZERO,
+            timestamp: Utc::now(),
+        };
+
+        let counter_sell = strategy.on_fill(&buy_fill).expect("Expected counter sell order");
+        assert_eq!(strategy.lots.len(), 1, "Expected 1 lot recorded");
+        assert_eq!(strategy.lots[0].buy_price, dec!(1.1800));
+        assert!(!strategy.lots[0].is_closed);
+        assert!(counter_sell.price > dec!(1.1800), "Counter sell price must be higher than buy price");
+
+        // Register counter sell order in active_orders
+        strategy.register_active_order(counter_sell.clone());
+
+        // 2. Price dumps from £1.18 to £1.14 (-3.4%).
+        // A rebalance occurs at mid=£1.1400.
+        // User holds 12.5 XRP, but that 12.5 XRP is ALREADY in an active sell order!
+        let rebalanced_orders = strategy.initialize_grid(dec!(1.1400), Some(dec!(50.0)), Some(dec!(12.5)));
+        let new_sells: Vec<&Order> = rebalanced_orders.iter().filter(|o| o.side == OrderSide::Sell).collect();
+
+        // Must NOT place new sell orders for the already-guarded 12.5 XRP!
+        assert_eq!(new_sells.len(), 0, "Rebalance must NOT place new sell rungs that dump existing inventory below buy price");
+
+        // 3. Price recovers to counter_sell.price and fills
+        let sell_fill = Fill {
+            runner_id: "test_lot_runner".into(),
+            order_id: counter_sell.id,
+            client_order_id: counter_sell.client_order_id.clone(),
+            symbol: Symbol::xrp_gbp(),
+            side: OrderSide::Sell,
+            price: counter_sell.price,
+            qty: dec!(12.5),
+            fee: Decimal::ZERO,
+            timestamp: Utc::now(),
+        };
+
+        let _ = strategy.on_fill(&sell_fill);
+        assert!(strategy.lots[0].is_closed, "Lot must be marked closed after sell fill");
+        assert!(strategy.realized_pnl > Decimal::ZERO, "Realized PnL must be strictly positive");
+        let expected_profit = (counter_sell.price - dec!(1.1800)) * dec!(12.5);
+        assert_eq!(strategy.realized_pnl, expected_profit, "Realized PnL must match exact (sell - buy) * qty math");
     }
 }
 

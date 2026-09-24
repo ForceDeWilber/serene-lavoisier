@@ -29,6 +29,19 @@ pub struct GridConfig {
     pub cost_basis: Option<Decimal>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InventoryLot {
+    pub lot_id: Uuid,
+    pub buy_order_id: Uuid,
+    pub buy_client_order_id: String,
+    pub buy_price: Decimal,
+    pub qty: Decimal,
+    pub counter_sell_order_id: Option<Uuid>,
+    pub counter_sell_client_order_id: Option<String>,
+    pub target_sell_price: Decimal,
+    pub is_closed: bool,
+}
+
 pub struct GeometricGridStrategy {
     pub config: GridConfig,
     pub center_price: Option<Decimal>,
@@ -38,6 +51,7 @@ pub struct GeometricGridStrategy {
     pub realized_pnl: Decimal,
     pub total_trades: usize,
     pub dynamic_pricing: DynamicPriceModel,
+    pub lots: Vec<InventoryLot>,
 }
 
 impl GeometricGridStrategy {
@@ -53,6 +67,7 @@ impl GeometricGridStrategy {
             realized_pnl: Decimal::ZERO,
             total_trades: 0,
             dynamic_pricing,
+            lots: Vec::new(),
         }
     }
 
@@ -168,8 +183,16 @@ impl GeometricGridStrategy {
         }
 
         // Generate SELL rungs above effective reservation center price
-        // Only place sells if we hold positive base inventory on spot!
-        let base_avail = available_base.unwrap_or(self.inventory_base);
+        // Only place sells if we hold unallocated base inventory (i.e. not already guarded by active sell orders)
+        let resting_sell_qty: Decimal = self
+            .active_orders
+            .values()
+            .filter(|o| o.side == OrderSide::Sell)
+            .map(|o| o.qty)
+            .sum();
+
+        let raw_base = available_base.unwrap_or(self.inventory_base);
+        let base_avail = (raw_base - resting_sell_qty).max(Decimal::ZERO);
         if base_avail > Decimal::ZERO {
             let mut current_sell_multiplier = one;
             let mut allocated_sell_base = Decimal::ZERO;
@@ -301,6 +324,21 @@ impl GeometricGridStrategy {
                     counter_price,
                     fill.qty,
                 );
+
+                // Register Lot in lot tracker
+                let lot = InventoryLot {
+                    lot_id: Uuid::new_v4(),
+                    buy_order_id: fill.order_id,
+                    buy_client_order_id: fill.client_order_id.clone(),
+                    buy_price: fill.price,
+                    qty: fill.qty,
+                    counter_sell_order_id: Some(order.id),
+                    counter_sell_client_order_id: Some(order.client_order_id.clone()),
+                    target_sell_price: counter_price,
+                    is_closed: false,
+                };
+                self.lots.push(lot);
+
                 info!(
                     "[{}] Grid BUY filled @ £{} -> counter SELL @ £{} (step: {:.3}%, inventory: {} {})",
                     self.config.runner_id,
@@ -314,10 +352,39 @@ impl GeometricGridStrategy {
             }
             OrderSide::Sell => {
                 self.inventory_base -= fill.qty;
-                // Realized profit calculation: (Sell Price - Buy Price) * Qty ~ step * notional
-                // Guarantee at least 1 penny realized profit tracked
-                let profit = (fill.price * fill.qty * dynamic_step).max(min_profit_floor_fiat);
+
+                // Match against open lot (first by counter_sell_client_order_id, fallback to FIFO)
+                let mut matched_buy_price = None;
+                for lot in self.lots.iter_mut() {
+                    if !lot.is_closed {
+                        let matches_cid = lot.counter_sell_client_order_id.as_deref() == Some(&fill.client_order_id);
+                        if matches_cid || matched_buy_price.is_none() {
+                            lot.is_closed = true;
+                            matched_buy_price = Some(lot.buy_price);
+                            if matches_cid {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // If no lot was matched (e.g. from pre-existing inventory), use cost_basis if present, or implied entry
+                let buy_price = matched_buy_price
+                    .or(self.config.cost_basis)
+                    .unwrap_or(fill.price / (one + dynamic_step));
+
+                let profit = (fill.price - buy_price) * fill.qty - fill.fee;
                 self.realized_pnl += profit;
+
+                info!(
+                    "[{}] Grid SELL filled @ £{} (matched buy @ £{}, qty: {}) -> True Realized Profit: £{:.4} (Total PnL: £{:.4})",
+                    self.config.runner_id,
+                    fill.price,
+                    buy_price,
+                    fill.qty,
+                    profit,
+                    self.realized_pnl
+                );
 
                 if self.config.mode.as_deref() == Some("WIND_DOWN") {
                     info!(

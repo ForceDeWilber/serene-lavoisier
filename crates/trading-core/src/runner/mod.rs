@@ -10,6 +10,7 @@ use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct RunnerTuningUpdate {
@@ -406,21 +407,31 @@ impl GridRunner {
                     if self.strategy.needs_rebalance(mid_price, elapsed_since_fill, oracle_lead) {
                         let effective_threshold = self.strategy.current_rebalance_threshold(elapsed_since_fill, oracle_lead);
                         info!(
-                            "[ORDER-INTENT] [{}] Price drifted from center ({:.2} -> {:.2}) exceeding dynamic threshold {:.3}% (clearing {} orders)",
+                            "[ORDER-INTENT] [{}] Price drifted from center ({:.2} -> {:.2}) exceeding dynamic threshold {:.3}% (rebalancing BUY rungs only)",
                             self.runner_id,
                             self.strategy.center_price.unwrap_or_default(),
                             mid_price,
-                            effective_threshold * rust_decimal_macros::dec!(100.0),
-                            self.strategy.active_orders.len()
+                            effective_threshold * rust_decimal_macros::dec!(100.0)
                         );
-                        // Cancel existing orders
-                        for (_, ord) in self.strategy.active_orders.drain() {
-                            let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
-                            info!("[ORDER-CANCEL] [{}] Canceled resting order {} for grid rebalance", self.runner_id, ord.client_order_id);
-                            if let Some(ref db) = self.db {
-                                db.update_order_status(&ord.client_order_id, "CANCELED").await;
+                        // Cancel ONLY resting BUY orders!
+                        // NEVER cancel or lower resting SELL orders that guard open inventory lots!
+                        let buy_order_ids: Vec<Uuid> = self
+                            .strategy
+                            .active_orders
+                            .iter()
+                            .filter(|(_, ord)| ord.side == OrderSide::Buy)
+                            .map(|(id, _)| *id)
+                            .collect();
+
+                        for id in buy_order_ids {
+                            if let Some(ord) = self.strategy.active_orders.remove(&id) {
+                                let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
+                                info!("[ORDER-CANCEL] [{}] Canceled resting BUY order {} for grid rebalance", self.runner_id, ord.client_order_id);
+                                if let Some(ref db) = self.db {
+                                    db.update_order_status(&ord.client_order_id, "CANCELED").await;
+                                }
+                                self.risk_engine.release_order_capital(&ord).await;
                             }
-                            self.risk_engine.release_order_capital(&ord).await;
                         }
                         // Re-initialize grid with live balances
                         let balances = self.execution_client.get_available_balances().await.ok();

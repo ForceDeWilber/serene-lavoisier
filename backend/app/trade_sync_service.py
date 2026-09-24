@@ -210,7 +210,7 @@ class TradeSyncService:
                                 recent_buys = recent_buys_res.scalars().all()
                                 matched_buy = None
                                 for b in recent_buys:
-                                    if abs(b.qty - qty) < 1e-7:
+                                    if abs(b.qty - qty) < 1e-4:
                                         matched_buy = b
                                         break
                                 if not matched_buy and recent_buys:
@@ -219,9 +219,9 @@ class TradeSyncService:
                                 if matched_buy and matched_buy.price > 0:
                                     profit = ((price - matched_buy.price) * qty * fx_rate) - fee_gbp
                                 else:
-                                    step = 0.006 if "SOL" in symbol else 0.004
+                                    step = 0.0035 if "XRP" in symbol else (0.006 if "SOL" in symbol else 0.004)
                                     profit = (price * qty * step * fx_rate) - fee_gbp
-                                realized_pnl_gbp = round(max(0.0001, profit), 6)
+                                realized_pnl_gbp = round(profit, 6)
                             
                             # Check if the fill belongs to a sniper or grid runner
                             strategy_type = "Maker Grid"
