@@ -19,6 +19,30 @@ pub struct DynamicPricingConfig {
     pub volatility_window_secs: i64,     // e.g. 120s
     pub min_rebalance_threshold_pct: Decimal, // e.g. 0.0035 (0.35% floor)
     pub base_rebalance_halflife_secs: u64,    // e.g. 1800s (30 mins baseline decay)
+    #[serde(default = "default_cash_reserve_pct")]
+    pub cash_reserve_pct: Decimal,           // e.g. 0.25 (25% cash buffer reserved)
+    #[serde(default = "default_geometric_spacing_ratio")]
+    pub geometric_spacing_ratio: Decimal,    // e.g. 0.15 (15% widening factor per rung level)
+    #[serde(default = "default_max_inventory_ratio")]
+    pub max_inventory_ratio: Decimal,        // e.g. 0.70 (cap base asset to max 70% of total portfolio value)
+}
+
+fn default_cash_reserve_pct() -> Decimal {
+    std::env::var("GRID_CASH_RESERVE_PCT")
+        .ok()
+        .and_then(|v| v.parse::<Decimal>().ok())
+        .unwrap_or(dec!(0.25))
+}
+
+fn default_geometric_spacing_ratio() -> Decimal {
+    std::env::var("GRID_GEOMETRIC_SPACING_RATIO")
+        .ok()
+        .and_then(|v| v.parse::<Decimal>().ok())
+        .unwrap_or(dec!(0.15))
+}
+
+fn default_max_inventory_ratio() -> Decimal {
+    dec!(0.70)
 }
 
 impl Default for DynamicPricingConfig {
@@ -26,7 +50,7 @@ impl Default for DynamicPricingConfig {
         let min_step = std::env::var("GRID_MIN_STEP_PCT")
             .ok()
             .and_then(|v| v.parse::<Decimal>().ok())
-            .unwrap_or(dec!(0.0009)); // 0.09% minimum spread for 0.00% maker fee on Revolut X
+            .unwrap_or(dec!(0.0020)); // 0.20% minimum spread floor (raised from 0.0009 to protect grid span)
 
         Self {
             enabled: true,
@@ -41,6 +65,9 @@ impl Default for DynamicPricingConfig {
             volatility_window_secs: 120,
             min_rebalance_threshold_pct: dec!(0.0035),
             base_rebalance_halflife_secs: 1800,
+            cash_reserve_pct: default_cash_reserve_pct(),
+            geometric_spacing_ratio: default_geometric_spacing_ratio(),
+            max_inventory_ratio: default_max_inventory_ratio(),
         }
     }
 }
@@ -134,8 +161,11 @@ impl DynamicPriceModel {
         let ratio = current_vol / self.config.baseline_volatility_pct;
         let adjusted_step = self.config.base_step_pct * ratio;
 
+        // Effective floor: ensure step never compresses below 50% of base_step_pct or min_step_pct
+        let effective_floor = self.config.min_step_pct.max(self.config.base_step_pct * dec!(0.50));
+
         adjusted_step
-            .max(self.config.min_step_pct)
+            .max(effective_floor)
             .min(self.config.max_step_pct)
     }
 
@@ -170,12 +200,45 @@ impl DynamicPriceModel {
         active_rungs: usize,
         configured_clip: Decimal,
     ) -> Decimal {
+        self.calculate_order_clip_with_inventory(
+            free_fiat,
+            active_rungs,
+            configured_clip,
+            Decimal::ZERO,
+            Decimal::ZERO,
+        )
+    }
+
+    /// Slices available capital into dynamic rung clips, applying inventory-weighted damping
+    /// when the portfolio is heavily skewed into base asset (>50% of total portfolio value).
+    pub fn calculate_order_clip_with_inventory(
+        &self,
+        free_fiat: Decimal,
+        active_rungs: usize,
+        configured_clip: Decimal,
+        inventory_base: Decimal,
+        mid_price: Decimal,
+    ) -> Decimal {
         if active_rungs == 0 {
             return configured_clip;
         }
 
         let rungs_dec = Decimal::from(active_rungs);
-        let budget_per_rung = (free_fiat / rungs_dec).round_dp(2);
+        let mut budget_per_rung = (free_fiat / rungs_dec).round_dp(2);
+
+        // Inventory weighting: if portfolio is heavy in base asset (>50%), dampen buy clip
+        if mid_price > Decimal::ZERO && inventory_base > Decimal::ZERO {
+            let base_val = inventory_base * mid_price;
+            let total_val = free_fiat + base_val;
+            if total_val > Decimal::ZERO {
+                let base_weight = base_val / total_val;
+                if base_weight > dec!(0.50) {
+                    // Dampen linearly: at 80% base weight, damping is 0.55
+                    let damping = (dec!(1.0) - (base_weight - dec!(0.50)) * dec!(1.50)).max(dec!(0.30));
+                    budget_per_rung = (budget_per_rung * damping).round_dp(2);
+                }
+            }
+        }
 
         // Respect min and max clips
         let clip = budget_per_rung
@@ -368,5 +431,32 @@ mod tests {
         model.record_sample(dec!(62000.0), now);
         let decay_high_vol = model.calculate_dynamic_rebalance_threshold(base_thresh, elapsed, dec!(0.0), None);
         assert!(decay_high_vol > decay_flat_inv, "High volatility should widen decay half-life");
+    }
+
+    #[test]
+    fn test_inventory_weighted_clip_damping() {
+        let config = DynamicPricingConfig::default();
+        let model = DynamicPriceModel::new(config);
+        let mid = dec!(1.12);
+
+        // Neutral inventory: $50 fiat, 0 base -> full clip ($50 / 5 = $10 per rung)
+        let clip_neutral = model.calculate_order_clip_with_inventory(dec!(50.0), 5, dec!(20.0), dec!(0.0), mid);
+        assert_eq!(clip_neutral, dec!(10.0));
+
+        // Heavy base inventory: $20 fiat, 80 XRP (worth ~£89.60) -> 89.6 / 109.6 = 81.7% base weight
+        // Damping should reduce buy clip below normal $4.00
+        let clip_heavy = model.calculate_order_clip_with_inventory(dec!(20.0), 5, dec!(20.0), dec!(80.0), mid);
+        assert!(clip_heavy < dec!(4.00), "Heavy base inventory should dampen buy clip");
+        assert!(clip_heavy >= dec!(1.00), "Damped clip should remain viable above min clip");
+    }
+
+    #[test]
+    fn test_min_step_floor_prevents_micro_collapse() {
+        let config = DynamicPricingConfig::default();
+        let model = DynamicPriceModel::new(config);
+
+        // Even with zero samples (flat calm), step must not collapse below min_step_pct floor (0.20%)
+        let step = model.calculate_dynamic_step();
+        assert!(step >= dec!(0.0020), "Dynamic step {} collapsed below 0.20% floor", step);
     }
 }

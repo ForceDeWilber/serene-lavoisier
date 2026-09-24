@@ -622,6 +622,82 @@ mod tests {
             assert!(b.price < dec!(1.1280), "Buy rungs should be below £1.1280");
         }
     }
+
+    #[test]
+    fn test_cash_reserve_buffer_preserves_unallocated_fiat() {
+        let config = GridConfig {
+            runner_id: "test_reserve_runner".into(),
+            symbol: Symbol::new("XRP", "GBP"),
+            step_pct: dec!(0.0035),
+            rungs_per_side: 5,
+            order_size_gbp: dec!(15.0),
+            rebalance_threshold_pct: dec!(0.012),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: true,
+                cash_reserve_pct: dec!(0.25),
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: None,
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+        let center = dec!(1.1350);
+
+        // £64.00 total cash available
+        let orders = strategy.initialize_grid(center, Some(dec!(64.00)), Some(dec!(0.0)));
+        let buys: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Buy).collect();
+        let total_allocated_fiat: Decimal = buys.iter().map(|o| o.price * o.qty).sum();
+
+        // 25% of £64.00 = £16.00 must remain unallocated! Total allocated buy fiat <= £48.00
+        assert!(
+            total_allocated_fiat <= dec!(48.05),
+            "Total allocated fiat £{} exceeded max allowed £48.00 (25% cash reserve breached!)",
+            total_allocated_fiat
+        );
+        let reserved_cash = dec!(64.00) - total_allocated_fiat;
+        assert!(
+            reserved_cash >= dec!(15.95),
+            "Reserved cash £{} was less than 25% (£16.00)",
+            reserved_cash
+        );
+        assert_eq!(buys.len(), 5, "All 5 rungs should be placed across the allocatable budget");
+    }
+
+    #[test]
+    fn test_geometric_expanding_spacing_widens_corridor() {
+        let config = GridConfig {
+            runner_id: "test_geo_runner".into(),
+            symbol: Symbol::new("XRP", "GBP"),
+            step_pct: dec!(0.0035),
+            rungs_per_side: 5,
+            order_size_gbp: dec!(15.0),
+            rebalance_threshold_pct: dec!(0.012),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: true,
+                geometric_spacing_ratio: dec!(0.15),
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: None,
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+        let center = dec!(1.1350);
+
+        let orders = strategy.initialize_grid(center, Some(dec!(100.0)), Some(dec!(0.0)));
+        let mut buys: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Buy).collect();
+        buys.sort_by(|a, b| b.price.cmp(&a.price));
+
+        let top_rung_price = buys.first().unwrap().price;
+        let bottom_rung_price = buys.last().unwrap().price;
+        let total_span_pct = (top_rung_price - bottom_rung_price) / top_rung_price;
+
+        // Verify span is wide (> 1.2%) rather than collapsing to < 0.35%
+        assert!(
+            total_span_pct >= dec!(0.012),
+            "Total buy span {:.4}% was too narrow (< 1.2%)",
+            total_span_pct * dec!(100.0)
+        );
+    }
 }
 
 

@@ -96,13 +96,28 @@ impl GeometricGridStrategy {
         self.effective_center = Some(effective_center);
 
         let dynamic_step = self.dynamic_pricing.calculate_dynamic_step();
+        let min_clip = dec!(1.00);
 
-        // Calculate dynamic order clip
-        let order_clip = free_fiat.map_or(self.config.order_size_gbp, |fiat| {
-            self.dynamic_pricing.calculate_order_clip(
-                fiat,
+        // Calculate allocatable fiat: if dynamic pricing is enabled and fiat is sufficient, reserve cash_reserve_pct
+        let max_allocatable_fiat = if let Some(fiat) = free_fiat {
+            let min_budget_for_full_grid = min_clip * Decimal::from(self.config.rungs_per_side);
+            if self.dynamic_pricing.config.enabled && fiat >= min_budget_for_full_grid {
+                (fiat * (dec!(1.0) - self.dynamic_pricing.config.cash_reserve_pct)).round_dp(2)
+            } else {
+                fiat
+            }
+        } else {
+            Decimal::MAX
+        };
+
+        // Calculate dynamic order clip with inventory weighting based on allocatable fiat
+        let order_clip = free_fiat.map_or(self.config.order_size_gbp, |_| {
+            self.dynamic_pricing.calculate_order_clip_with_inventory(
+                max_allocatable_fiat,
                 self.config.rungs_per_side,
                 self.config.order_size_gbp,
+                self.inventory_base,
+                mid_price,
             )
         });
 
@@ -121,23 +136,22 @@ impl GeometricGridStrategy {
         let one = dec!(1.0);
 
         // Generate BUY rungs below effective reservation center price (unless winding down)
+        // Strictly respect cash_reserve_pct so capital is never 100% exhausted on a dip
         if order_clip >= dec!(1.00) && self.config.mode.as_deref() != Some("WIND_DOWN") {
             let mut current_buy_multiplier = one;
             let mut allocated_buy_fiat = Decimal::ZERO;
-            let min_clip = dec!(1.00);
 
-            for _ in 1..=self.config.rungs_per_side {
-                let remaining_fiat = if let Some(fiat) = free_fiat {
-                    fiat - allocated_buy_fiat
-                } else {
-                    Decimal::MAX
-                };
+            for rung_idx in 1..=self.config.rungs_per_side {
+                let remaining_fiat = max_allocatable_fiat - allocated_buy_fiat;
 
                 if remaining_fiat < min_clip {
                     break;
                 }
 
-                current_buy_multiplier *= one - dynamic_step;
+                // Progressive expanding geometric spacing factor
+                let geo_factor = one + self.dynamic_pricing.config.geometric_spacing_ratio * Decimal::from(rung_idx - 1);
+                let step_at_rung = dynamic_step * geo_factor;
+                current_buy_multiplier *= one - step_at_rung;
                 let rung_price = round_price_for(effective_center * current_buy_multiplier);
                 if rung_price <= Decimal::ZERO {
                     continue;
@@ -210,8 +224,10 @@ impl GeometricGridStrategy {
                 let floor_price = self.config.cost_basis.map(|cb| round_price_for(cb * min_profit_multiplier));
                 let min_profit_floor_fiat = dec!(0.01);
 
-                for _ in 1..=self.config.rungs_per_side {
-                    current_sell_multiplier *= one + dynamic_step;
+                for rung_idx in 1..=self.config.rungs_per_side {
+                    let geo_factor = one + self.dynamic_pricing.config.geometric_spacing_ratio * Decimal::from(rung_idx - 1);
+                    let step_at_rung = dynamic_step * geo_factor;
+                    current_sell_multiplier *= one + step_at_rung;
                     let mut rung_price = round_price_for(effective_center * current_sell_multiplier);
 
                     if let Some(floor) = floor_price {
