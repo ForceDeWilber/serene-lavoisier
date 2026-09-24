@@ -527,6 +527,101 @@ mod tests {
         let expected_profit = (counter_sell.price - dec!(1.1800)) * dec!(12.5);
         assert_eq!(strategy.realized_pnl, expected_profit, "Realized PnL must match exact (sell - buy) * qty math");
     }
+
+    #[test]
+    fn test_hibernation_prevents_buy_orders_during_plunge() {
+        use crate::strategy::{AlphaConfig, AlphaMomentumEngine, MarketRegime};
+        let mut alpha = AlphaMomentumEngine::new(AlphaConfig::default());
+        let mut now = Utc::now();
+
+        let config = GridConfig {
+            runner_id: "test_hibernation_runner".into(),
+            symbol: Symbol::xrp_gbp(),
+            step_pct: dec!(0.0035),
+            rungs_per_side: 5,
+            order_size_gbp: dec!(15.0),
+            rebalance_threshold_pct: dec!(0.012),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: None,
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+
+        // Pre-existing protected inventory: 20 XRP bought at £1.15, guarded by counter sell @ £1.1550
+        let resting_sell = Order::new_limit_post_only(
+            "test_hibernation_runner",
+            Symbol::xrp_gbp(),
+            OrderSide::Sell,
+            dec!(1.1550),
+            dec!(20.0),
+        );
+        strategy.register_active_order(resting_sell);
+
+        // 1. Normal baseline @ £1.1400
+        alpha.record_binance_tick(dec!(1.50), now);
+        alpha.record_kraken_tick(dec!(1.1400), now);
+        let (r, cancel, _) = alpha.record_revolut_tick(dec!(1.1400), now);
+        assert_eq!(r, MarketRegime::Normal);
+        assert!(!cancel);
+        assert!(!alpha.is_hibernating());
+
+        // 2. Global market plunges! Binance drops to $1.485 (-1.0%), Kraken to £1.1280.
+        // Revolut order book is lagging, still at £1.1400.
+        now = now + chrono::Duration::seconds(1);
+        let (r_b, cancel_b, _) = alpha.record_binance_tick(dec!(1.485), now);
+        alpha.record_kraken_tick(dec!(1.1280), now);
+        let (r_rev, _, _) = alpha.record_revolut_tick(dec!(1.1400), now);
+
+        assert_eq!(r_b, MarketRegime::ToxicPlunge);
+        assert!(cancel_b);
+        assert_eq!(r_rev, MarketRegime::ToxicPlunge);
+        assert!(alpha.is_hibernating(), "Engine must be hibernating");
+
+        // 3. While hibernating, test grid initialization & rebalance:
+        // Attempting to generate orders while hibernating must produce ZERO BUY RUNGS!
+        let mut orders = strategy.initialize_grid(dec!(1.1400), Some(dec!(50.0)), Some(dec!(20.0)));
+        if alpha.is_hibernating() {
+            orders.retain(|o| o.side == OrderSide::Sell);
+        }
+
+        let buys: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Buy).collect();
+        assert_eq!(buys.len(), 0, "Hibernation must strictly block any BUY orders from being placed!");
+
+        // Protected sell must still exist in active_orders
+        assert_eq!(strategy.active_orders.len(), 1);
+        assert_eq!(strategy.active_orders.values().next().unwrap().side, OrderSide::Sell);
+
+        // 4. Market stabilizes at £1.1280
+        let mut stabilized = false;
+        for _ in 0..8 {
+            now = now + chrono::Duration::seconds(1);
+            alpha.record_binance_tick(dec!(1.4842), now);
+            alpha.record_kraken_tick(dec!(1.1280), now);
+            let (regime, _, reanchor) = alpha.record_revolut_tick(dec!(1.1280), now);
+            if reanchor {
+                stabilized = true;
+                assert_eq!(regime, MarketRegime::Stabilizing);
+                break;
+            }
+        }
+
+        assert!(stabilized, "Market should stabilize");
+        assert!(!alpha.is_hibernating(), "Hibernation should be lifted after stabilization");
+
+        // 5. Fresh buy rungs can now be safely generated at the bottom (£1.1280)
+        let mut bottom_orders = strategy.initialize_grid(dec!(1.1280), Some(dec!(50.0)), Some(dec!(20.0)));
+        if alpha.is_hibernating() {
+            bottom_orders.retain(|o| o.side == OrderSide::Sell);
+        }
+        let bottom_buys: Vec<&Order> = bottom_orders.iter().filter(|o| o.side == OrderSide::Buy).collect();
+        assert_eq!(bottom_buys.len(), 5, "5 fresh buy rungs should now be placed at the bottom");
+        for b in bottom_buys {
+            assert!(b.price < dec!(1.1280), "Buy rungs should be below £1.1280");
+        }
+    }
 }
 
 

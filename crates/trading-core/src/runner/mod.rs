@@ -54,6 +54,7 @@ pub struct GridRunner {
     brain: Option<Arc<crate::brain::EngineBrain>>,
     last_init_attempt: Option<tokio::time::Instant>,
     last_fill_instant: Option<tokio::time::Instant>,
+    last_snipe_instant: Option<tokio::time::Instant>,
     alpha_engine: crate::strategy::AlphaMomentumEngine,
 }
 
@@ -84,6 +85,7 @@ impl GridRunner {
             brain: None,
             last_init_attempt: None,
             last_fill_instant: None,
+            last_snipe_instant: None,
             alpha_engine: crate::strategy::AlphaMomentumEngine::new(crate::strategy::AlphaConfig::default()),
         }
     }
@@ -260,7 +262,7 @@ impl GridRunner {
                     // 1. High-Frequency Lead Feed (Strictly Binance USDT Stream)
                     if tick.symbol.quote == "USDT" {
                         let (_regime, should_cancel_bids, should_reanchor_bottom) =
-                            self.alpha_engine.record_tick(tick.last, tick.timestamp);
+                            self.alpha_engine.record_binance_tick(tick.last, tick.timestamp);
 
                         if should_cancel_bids {
                             let buys_to_cancel: Vec<Order> = self.strategy.active_orders.values()
@@ -270,7 +272,7 @@ impl GridRunner {
 
                             if !buys_to_cancel.is_empty() {
                                 warn!(
-                                    "[ALPHA-SHIELD] [{}] Toxic plunge detected on Binance! Canceling {} resting BUY bids on Revolut X in < 80ms",
+                                    "[ALPHA-SHIELD] [{}] Toxic plunge detected by Binance Oracle! Canceling {} resting BUY bids on Revolut X in < 80ms",
                                     self.runner_id, buys_to_cancel.len()
                                 );
 
@@ -288,7 +290,7 @@ impl GridRunner {
 
                         if should_reanchor_bottom {
                             info!(
-                                "[ALPHA-REANCHOR] [{}] Binance market stabilized after plunge. Re-anchoring grid center at next native quote tick.",
+                                "[ALPHA-REANCHOR] [{}] Market stabilized after plunge. Re-anchoring grid center at next native quote tick.",
                                 self.runner_id
                             );
                             self.strategy.center_price = None;
@@ -298,17 +300,53 @@ impl GridRunner {
                         continue;
                     }
 
-                    // 2. Native Quote Feed (must exactly match runner symbol e.g. SOL/GBP)
+                    // 2. Native Quote Feed (must exactly match runner symbol e.g. XRP/GBP)
                     if tick.symbol != self.symbol {
                         continue;
                     }
 
                     let mid_price = tick.mid_price();
 
+                    // Record native tick in Oracle: Kraken GBP feed + Revolut Mid feed
+                    self.alpha_engine.record_kraken_tick(tick.last, tick.timestamp);
+                    let (regime, should_cancel_bids, should_reanchor_bottom) =
+                        self.alpha_engine.record_revolut_tick(mid_price, tick.timestamp);
+
+                    if should_cancel_bids {
+                        let buys_to_cancel: Vec<Order> = self.strategy.active_orders.values()
+                            .filter(|o| o.side == OrderSide::Buy)
+                            .cloned()
+                            .collect();
+
+                        if !buys_to_cancel.is_empty() {
+                            warn!(
+                                "[ALPHA-SHIELD] [{}] Toxic dislocation detected by Oracle! Canceling {} resting BUY bids on Revolut X",
+                                self.runner_id, buys_to_cancel.len()
+                            );
+
+                            for ord in buys_to_cancel {
+                                let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
+                                info!("[ORDER-CANCEL] [{}] Canceled resting BUY order {} due to toxic dislocation", self.runner_id, ord.client_order_id);
+                                if let Some(ref db) = self.db {
+                                    db.update_order_status(&ord.client_order_id, "CANCELED").await;
+                                }
+                                self.strategy.active_orders.remove(&ord.id);
+                                self.risk_engine.release_order_capital(&ord).await;
+                            }
+                        }
+                    }
+
+                    if should_reanchor_bottom {
+                        info!(
+                            "[ALPHA-REANCHOR] [{}] Oracle confirmed market equilibrium restored. Re-anchoring grid center.",
+                            self.runner_id
+                        );
+                        self.strategy.center_price = None;
+                        self.last_init_attempt = None;
+                    }
+
                     // Record tick in dynamic pricing model to track rolling volatility
                     self.strategy.record_tick(mid_price, tick.timestamp);
-
-                    let regime = self.alpha_engine.current_regime();
 
                     // 3. Process fills in paper simulator if present
                     if let Some(ref sim) = self.simulator {
@@ -344,9 +382,10 @@ impl GridRunner {
                         }
                     }
 
-                    // 4. Initialize grid if not yet initialized or if active orders are empty (blocked during toxic plunge)
+                    // 4. Initialize grid if not yet initialized or if active orders are empty (blocked during toxic plunge / hibernation)
                     let should_init = (self.strategy.center_price.is_none() || self.strategy.active_orders.is_empty())
                         && mid_price > Decimal::ZERO
+                        && !self.alpha_engine.is_hibernating()
                         && regime != crate::strategy::MarketRegime::ToxicPlunge
                         && self.last_init_attempt.map_or(true, |t| t.elapsed() >= tokio::time::Duration::from_secs(10));
 
@@ -378,7 +417,11 @@ impl GridRunner {
                             "[ORDER-INTENT] [{}] Initializing grid: mid={}{:.2}, {} rungs/side (allocated budget: {:?}, base balance: {:?})",
                             self.runner_id, if self.symbol.quote == "USD" { "$" } else { "£" }, mid_price, self.strategy.config.rungs_per_side, free_fiat, available_base
                         );
-                        let initial_orders = self.strategy.initialize_grid(mid_price, free_fiat, available_base);
+                        let mut initial_orders = self.strategy.initialize_grid(mid_price, free_fiat, available_base);
+                        if self.alpha_engine.is_hibernating() {
+                            initial_orders.retain(|o| o.side == OrderSide::Sell);
+                        }
+
                         for order in initial_orders {
                             match self.risk_engine.validate_order(&order).await {
                                 Ok(()) => {
@@ -404,7 +447,27 @@ impl GridRunner {
                         _ => None,
                     };
 
-                    if self.strategy.needs_rebalance(mid_price, elapsed_since_fill, oracle_lead) {
+                    if self.alpha_engine.is_hibernating() {
+                        // While hibernating, ensure no BUY orders are resting or placed
+                        let buy_order_ids: Vec<Uuid> = self
+                            .strategy
+                            .active_orders
+                            .iter()
+                            .filter(|(_, ord)| ord.side == OrderSide::Buy)
+                            .map(|(id, _)| *id)
+                            .collect();
+
+                        for id in buy_order_ids {
+                            if let Some(ord) = self.strategy.active_orders.remove(&id) {
+                                let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
+                                info!("[ORDER-CANCEL] [{}] Canceled resting BUY order {} during hibernation", self.runner_id, ord.client_order_id);
+                                if let Some(ref db) = self.db {
+                                    db.update_order_status(&ord.client_order_id, "CANCELED").await;
+                                }
+                                self.risk_engine.release_order_capital(&ord).await;
+                            }
+                        }
+                    } else if self.strategy.needs_rebalance(mid_price, elapsed_since_fill, oracle_lead) {
                         let effective_threshold = self.strategy.current_rebalance_threshold(elapsed_since_fill, oracle_lead);
                         info!(
                             "[ORDER-INTENT] [{}] Price drifted from center ({:.2} -> {:.2}) exceeding dynamic threshold {:.3}% (rebalancing BUY rungs only)",
@@ -452,7 +515,11 @@ impl GridRunner {
                         };
                         let available_base = balances.as_ref().map(|b| b.get(&self.symbol.base).copied().unwrap_or(Decimal::ZERO));
 
-                        let new_orders = self.strategy.initialize_grid(mid_price, free_fiat, available_base);
+                        let mut new_orders = self.strategy.initialize_grid(mid_price, free_fiat, available_base);
+                        if self.alpha_engine.is_hibernating() {
+                            new_orders.retain(|o| o.side == OrderSide::Sell);
+                        }
+
                         for order in new_orders {
                             match self.risk_engine.validate_order(&order).await {
                                 Ok(()) => {
@@ -469,6 +536,104 @@ impl GridRunner {
                             }
                         }
                         self.last_fill_instant = Some(tokio::time::Instant::now());
+                    }
+
+                    // 6. Bullish Surge: Dynamic Surge Peak Harvest & Opportunistic Snipe
+                    if regime == crate::strategy::MarketRegime::BullishSurge {
+                        let dislocation_pct = self.alpha_engine.current_dislocation_pct().unwrap_or(Decimal::ZERO);
+                        let can_snipe = dislocation_pct >= rust_decimal_macros::dec!(0.22)
+                            && self.last_snipe_instant.map_or(true, |t| t.elapsed() >= tokio::time::Duration::from_secs(15));
+
+                        if can_snipe {
+                            // Check if unallocated cash is available without touching resting orders
+                            if let Ok(bals) = self.execution_client.get_available_balances().await {
+                                let free_cash = bals.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO);
+                                if free_cash >= rust_decimal_macros::dec!(1.00) {
+                                    let snipe_clip = free_cash.min(self.strategy.config.order_size_gbp);
+                                    let (_, min_tick) = crate::strategy::price_scale_and_tick(mid_price);
+                                    // Tight marketable limit ceiling: mid_price + 0.05%
+                                    let snipe_ceiling = crate::strategy::round_price_for(mid_price * rust_decimal_macros::dec!(1.0005));
+                                    let qty_dp = if self.symbol.base == "XRP" { 5 } else { 6 };
+                                    let snipe_qty = (snipe_clip / snipe_ceiling).round_dp(qty_dp);
+
+                                    if snipe_qty > Decimal::ZERO && (snipe_qty * snipe_ceiling).round_dp(2) >= rust_decimal_macros::dec!(1.00) {
+                                        info!(
+                                            "[OPPORTUNISTIC-SNIPE] [{}] Oracle surge edge +{:.2}%! Firing tight marketable limit: buy {} {} <= £{} (Free cash: £{})",
+                                            self.runner_id, dislocation_pct, snipe_qty, self.symbol.base, snipe_ceiling, free_cash
+                                        );
+                                        self.last_snipe_instant = Some(tokio::time::Instant::now());
+
+                                        let snipe_order = Order::new_limit_taker(
+                                            &self.runner_id,
+                                            self.symbol.clone(),
+                                            OrderSide::Buy,
+                                            snipe_ceiling,
+                                            snipe_qty,
+                                        );
+
+                                        match self.execution_client.submit_taker_order(&snipe_order).await {
+                                            Ok(filled) => {
+                                                info!(
+                                                    "[OPPORTUNISTIC-SNIPE-FILLED] [{}] Bought {} {} @ £{}! Parking exit at surge peak",
+                                                    self.runner_id, filled.qty, self.symbol.base, filled.price
+                                                );
+                                                self.last_fill_instant = Some(tokio::time::Instant::now());
+
+                                                let snipe_fill = crate::model::Fill {
+                                                    order_id: filled.id,
+                                                    client_order_id: filled.client_order_id.clone(),
+                                                    runner_id: self.runner_id.clone(),
+                                                    symbol: self.symbol.clone(),
+                                                    side: filled.side,
+                                                    price: filled.price,
+                                                    qty: filled.qty,
+                                                    fee: (filled.price * filled.qty * rust_decimal_macros::dec!(0.0009)).round_dp(4),
+                                                    timestamp: chrono::Utc::now(),
+                                                };
+                                                self.risk_engine.settle_fill(&snipe_fill).await;
+                                                self.strategy.inventory_base += snipe_fill.qty;
+
+                                                let target_exit = self.alpha_engine.predicted_surge_peak_gbp()
+                                                    .unwrap_or(crate::strategy::round_price_for(filled.price * rust_decimal_macros::dec!(1.0030)))
+                                                    .max(crate::strategy::round_price_for(filled.price + min_tick));
+
+                                                let counter_exit = Order::new_limit_post_only(
+                                                    &self.runner_id,
+                                                    self.symbol.clone(),
+                                                    OrderSide::Sell,
+                                                    target_exit,
+                                                    filled.qty,
+                                                );
+
+                                                if let Ok(exit_submitted) = self.submit_and_save(&counter_exit).await {
+                                                    info!(
+                                                        "[SNIPE-EXIT-PLACED] [{}] Parked counter-sell @ £{} for {} {} (0.00% maker exit)",
+                                                        self.runner_id, exit_submitted.price, exit_submitted.qty, self.symbol.base
+                                                    );
+                                                    self.strategy.register_active_order(exit_submitted.clone());
+
+                                                    let lot = crate::strategy::InventoryLot {
+                                                        lot_id: Uuid::new_v4(),
+                                                        buy_order_id: filled.id,
+                                                        buy_client_order_id: filled.client_order_id.clone(),
+                                                        buy_price: filled.price,
+                                                        qty: filled.qty,
+                                                        counter_sell_order_id: Some(exit_submitted.id),
+                                                        counter_sell_client_order_id: Some(exit_submitted.client_order_id.clone()),
+                                                        target_sell_price: target_exit,
+                                                        is_closed: false,
+                                                    };
+                                                    self.strategy.lots.push(lot);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("[OPPORTUNISTIC-SNIPE-REJECT] [{}] Snipe rejected or missed window: {}", self.runner_id, e);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     self.publish_telemetry();
                 }
