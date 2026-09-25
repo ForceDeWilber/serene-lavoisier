@@ -212,9 +212,13 @@ impl DbStore {
         let mut open_lots: Vec<crate::strategy::InventoryLot> = Vec::new();
         let min_profit_margin = Decimal::from_str("0.0015").unwrap_or_default();
         let dust = Decimal::from_str("0.000001").unwrap_or_default();
+        let mut seen_cids = std::collections::HashSet::new();
 
         for r in rows {
             let (id_str, cid, side, price_f, qty_f) = r?;
+            if !cid.is_empty() && !seen_cids.insert(cid.clone()) {
+                continue;
+            }
             let price = Decimal::from_str(&format!("{:.8}", price_f)).unwrap_or_default();
             let qty = Decimal::from_str(&format!("{:.8}", qty_f)).unwrap_or_default();
 

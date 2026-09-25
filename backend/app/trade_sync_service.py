@@ -163,11 +163,19 @@ class TradeSyncService:
                             if not fill_id or fill_id == "None":
                                 continue
                                 
-                            existing = await session.get(TradeRecord, fill_id)
-                            if existing:
-                                continue
-
                             client_order_id = fill.get("client_order_id", "")
+                            if client_order_id:
+                                existing_res = await session.execute(
+                                    select(TradeRecord).where(
+                                        (TradeRecord.id == fill_id) | (TradeRecord.client_order_id == client_order_id)
+                                    )
+                                )
+                                if existing_res.scalars().first():
+                                    continue
+                            else:
+                                existing = await session.get(TradeRecord, fill_id)
+                                if existing:
+                                    continue
                             symbol = fill.get("symbol", "")
                             side = str(fill.get("side", "BUY")).upper()
                             price = float(fill.get("price", 0.0) or 0.0)
