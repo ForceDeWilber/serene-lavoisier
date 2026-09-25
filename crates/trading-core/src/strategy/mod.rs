@@ -532,6 +532,9 @@ impl GeometricGridStrategy {
         elapsed_since_fill: Option<StdDuration>,
         oracle_lead_pct: Option<Decimal>,
     ) -> bool {
+        if self.config.mode.as_deref() == Some("WIND_DOWN") {
+            return false;
+        }
         if let Some(center) = self.center_price {
             if center > Decimal::ZERO {
                 let drift = (current_mid - center).abs() / center;

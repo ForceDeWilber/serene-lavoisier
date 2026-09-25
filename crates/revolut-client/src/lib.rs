@@ -109,6 +109,8 @@ impl LiveRevolutClient {
 
         let base_size_str = if order.symbol.base == "XRP" {
             format!("{:.5}", order.qty)
+        } else if order.symbol.base == "SOL" {
+            format!("{:.6}", order.qty)
         } else {
             format!("{:.8}", order.qty)
         };
@@ -525,6 +527,8 @@ impl ExecutionClient for LiveRevolutClient {
                 ("ETH".to_string(), "GBP".to_string())
             } else if sym_str.contains("SOL") {
                 ("SOL".to_string(), "GBP".to_string())
+            } else if sym_str.contains("XRP") {
+                ("XRP".to_string(), "GBP".to_string())
             } else {
                 ("BTC".to_string(), "GBP".to_string())
             };

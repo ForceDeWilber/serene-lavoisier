@@ -73,6 +73,7 @@ impl RunnerManager {
                 curr_grid.rebalance_threshold_pct = Some(config.rebalance_threshold_pct);
                 curr_grid.order_size_fiat = Some(config.order_size_fiat);
                 curr_grid.paused = !config.is_active;
+                let is_wind_down = curr_grid.mode.as_deref() == Some("WIND_DOWN");
                 let _ = handle.grid_tune_tx.send(curr_grid);
 
                 let mut curr_sniper = handle.sniper_tune_tx.borrow().clone();
@@ -81,7 +82,7 @@ impl RunnerManager {
                 curr_sniper.order_size_gbp = Some(config.sniper_order_size_fiat);
                 let _ = handle.sniper_tune_tx.send(curr_sniper);
 
-                if config.is_active {
+                if config.is_active && !is_wind_down {
                     self.brain.register_active_pair(config.symbol.clone());
                 } else {
                     self.brain.remove_active_pair(&config.symbol);
@@ -94,7 +95,14 @@ impl RunnerManager {
             }
         }
 
-        if config.is_active {
+        // 4. Dynamic Execution Mode & Cost Basis Floor Overrides from Environment
+        let mode_key = format!("MODE_{}_{}", config.symbol.base, config.symbol.quote);
+        let mode = std::env::var(&mode_key).ok();
+        if let Some(ref m) = mode {
+            info!("Configured execution mode for {}: {}", config.symbol.as_slash(), m);
+        }
+
+        if config.is_active && mode.as_deref() != Some("WIND_DOWN") {
             self.brain.register_active_pair(config.symbol.clone());
         }
 
@@ -120,7 +128,7 @@ impl RunnerManager {
             order_size_fiat: Some(config.order_size_fiat),
             dynamic_pricing_enabled: Some(true),
             inventory_gamma: Some(dec!(0.08)),
-            mode: None,
+            mode: mode.clone(),
         });
 
         let (sniper_tune_tx, sniper_tune_rx) = watch::channel(SniperTuningUpdate {
@@ -147,7 +155,7 @@ impl RunnerManager {
             order_size_gbp: config.order_size_fiat,
             rebalance_threshold_pct: config.rebalance_threshold_pct,
             dynamic_pricing: trading_core::strategy::DynamicPricingConfig::default(),
-            mode: None,
+            mode,
             cost_basis,
         };
 

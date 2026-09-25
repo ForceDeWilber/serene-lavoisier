@@ -217,9 +217,15 @@ async fn main() -> anyhow::Result<()> {
 
     // 10. Wait for termination signal
     tokio::signal::ctrl_c().await?;
-    warn!("Shutdown signal received. Canceling all active resting orders across venues...");
-    let _ = execution_client.cancel_all_orders().await;
-    info!("Successfully canceled active orders. System shut down cleanly.");
+    warn!("Shutdown signal received. Canceling resting BUY orders to safeguard capital...");
+    if let Ok(active) = execution_client.get_active_orders().await {
+        for ord in active {
+            if ord.side == trading_core::model::OrderSide::Buy {
+                let _ = execution_client.cancel_order(&ord.client_order_id).await;
+            }
+        }
+    }
+    info!("Successfully canceled resting BUY orders. Resting profit-taking SELL orders preserved. System shut down cleanly.");
 
     Ok(())
 }

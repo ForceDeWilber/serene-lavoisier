@@ -184,10 +184,22 @@ impl GridRunner {
                                     break;
                                 }
                             }
+                            self.strategy.register_active_order(ord);
                         } else {
-                            adopted_buys += 1;
+                            if self.strategy.config.mode.as_deref() == Some("WIND_DOWN") {
+                                info!(
+                                    "[WIND-DOWN] [{}] Canceling resting venue BUY order {} on startup",
+                                    self.runner_id, ord.client_order_id
+                                );
+                                let _ = self.execution_client.cancel_order(&ord.client_order_id).await;
+                                if let Some(ref db) = self.db {
+                                    db.update_order_status(&ord.client_order_id, "CANCELED").await;
+                                }
+                            } else {
+                                adopted_buys += 1;
+                                self.strategy.register_active_order(ord);
+                            }
                         }
-                        self.strategy.register_active_order(ord);
                     }
                 }
                 if adopted_buys > 0 || adopted_sells > 0 {
@@ -469,7 +481,9 @@ impl GridRunner {
                         self.last_init_attempt = Some(tokio::time::Instant::now());
                         let balances = self.execution_client.get_available_balances().await.ok();
                         let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
-                        let free_fiat = if let Some(ref brain) = self.brain {
+                        let free_fiat = if self.strategy.config.mode.as_deref() == Some("WIND_DOWN") {
+                            Some(Decimal::ZERO)
+                        } else if let Some(ref brain) = self.brain {
                             let registered_pairs = brain.get_active_pairs_for_quote(&self.symbol.quote);
                             let active_pairs = if registered_pairs.is_empty() {
                                 vec![self.symbol.clone()]
@@ -575,7 +589,9 @@ impl GridRunner {
                         // Re-initialize grid with live balances
                         let balances = self.execution_client.get_available_balances().await.ok();
                         let total_quote = balances.as_ref().map(|b| b.get(&self.symbol.quote).copied().unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
-                        let free_fiat = if let Some(ref brain) = self.brain {
+                        let free_fiat = if self.strategy.config.mode.as_deref() == Some("WIND_DOWN") {
+                            Some(Decimal::ZERO)
+                        } else if let Some(ref brain) = self.brain {
                             let registered_pairs = brain.get_active_pairs_for_quote(&self.symbol.quote);
                             let active_pairs = if registered_pairs.is_empty() {
                                 vec![self.symbol.clone()]
@@ -615,7 +631,7 @@ impl GridRunner {
                     }
 
                     // 6. Bullish Surge: Dynamic Surge Peak Harvest & Opportunistic Snipe
-                    if regime == crate::strategy::MarketRegime::BullishSurge {
+                    if regime == crate::strategy::MarketRegime::BullishSurge && self.strategy.config.mode.as_deref() != Some("WIND_DOWN") {
                         let dislocation_pct = self.alpha_engine.current_dislocation_pct().unwrap_or(Decimal::ZERO);
                         let can_snipe = dislocation_pct >= rust_decimal_macros::dec!(0.22)
                             && self.last_snipe_instant.map_or(true, |t| t.elapsed() >= tokio::time::Duration::from_secs(15));
