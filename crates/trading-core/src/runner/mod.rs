@@ -155,7 +155,13 @@ impl GridRunner {
                         max_buy
                     );
                     self.strategy.lots = lots;
-                    self.strategy.config.cost_basis = Some(avg_cost);
+                    let effective_cb = match (self.strategy.config.cost_basis, Some(avg_cost)) {
+                        (Some(configured), Some(avg)) => Some(configured.max(avg)),
+                        (None, Some(avg)) => Some(avg),
+                        (Some(configured), None) => Some(configured),
+                        (None, None) => None,
+                    };
+                    self.strategy.config.cost_basis = effective_cb;
                 }
             }
         }
@@ -447,8 +453,13 @@ impl GridRunner {
                         }
                     }
 
-                    // 4. Initialize grid if not yet initialized or if active orders are empty (blocked during toxic plunge / hibernation)
-                    let should_init = (self.strategy.center_price.is_none() || self.strategy.active_orders.is_empty())
+                    // If center price is not yet set, initialize it from mid_price so relative moves are calculated accurately
+                    if self.strategy.center_price.is_none() && mid_price > Decimal::ZERO {
+                        self.strategy.center_price = Some(mid_price);
+                    }
+
+                    // 4. Initialize grid if active orders are empty (blocked during toxic plunge / hibernation)
+                    let should_init = self.strategy.active_orders.is_empty()
                         && mid_price > Decimal::ZERO
                         && !self.alpha_engine.is_hibernating()
                         && regime != crate::strategy::MarketRegime::ToxicPlunge

@@ -746,6 +746,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_configured_cost_basis_overrides_lower_lots_in_initialize_grid() {
+        let config = GridConfig {
+            runner_id: "test_cost_basis_runner".into(),
+            symbol: Symbol::xrp_gbp(),
+            step_pct: dec!(0.0035),
+            rungs_per_side: 5,
+            order_size_gbp: dec!(15.0),
+            rebalance_threshold_pct: dec!(0.012),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: Some(dec!(1.1680)), // Configured floor is £1.1680
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+
+        // Inventory lot bought lower at £1.1500
+        strategy.lots.push(InventoryLot {
+            lot_id: Uuid::new_v4(),
+            buy_order_id: Uuid::new_v4(),
+            buy_client_order_id: "lower_buy".into(),
+            buy_price: dec!(1.1500),
+            qty: dec!(10.0),
+            counter_sell_order_id: None,
+            counter_sell_client_order_id: None,
+            target_sell_price: dec!(1.1550),
+            is_closed: false,
+        });
+
+        // Market is at £1.1550
+        let orders = strategy.initialize_grid(dec!(1.1550), Some(dec!(50.0)), Some(dec!(10.0)));
+        let sells: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Sell).collect();
+
+        assert!(!sells.is_empty(), "Should generate sell orders");
+        for sell in sells {
+            // Must strictly be >= 1.1680 * 1.0015 = 1.169752... -> 1.1698
+            assert!(
+                sell.price >= dec!(1.1680),
+                "Sell order price £{} was below configured cost basis floor £1.1680!",
+                sell.price
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_db_reconstruct_open_lots_exact_fifo() {
         let db_path = format!("/tmp/test_db_{}.db", Uuid::new_v4());

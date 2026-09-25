@@ -285,10 +285,13 @@ impl GeometricGridStrategy {
                         }
                     }
 
-                    // Strict Zero-Loss Floor: Ensure sell price >= max_lot_buy_price (or cost_basis) * (1 + 0.15%) + Penny Shield
-                    let reference_price = max_lot_buy_price
-                        .or(self.config.cost_basis)
-                        .unwrap_or(effective_center);
+                    // Strict Zero-Loss Floor: Ensure sell price >= max(max_lot_buy_price, cost_basis) * (1 + 0.15%) + Penny Shield
+                    let reference_price = match (max_lot_buy_price, self.config.cost_basis) {
+                        (Some(lot_p), Some(cfg_p)) => lot_p.max(cfg_p),
+                        (Some(lot_p), None) => lot_p,
+                        (None, Some(cfg_p)) => cfg_p,
+                        (None, None) => effective_center,
+                    };
                     let floor_price = round_price_for(reference_price * min_profit_multiplier);
 
                     let (scale_factor, min_tick) = price_scale_and_tick(reference_price);

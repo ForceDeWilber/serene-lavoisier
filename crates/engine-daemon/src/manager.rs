@@ -179,10 +179,8 @@ impl RunnerManager {
             kraken_price: None,
         });
 
-        let initial_orders = self.execution_client.get_active_orders().await.unwrap_or_default();
         let grid_runner = grid_runner
             .with_brain(self.brain.clone())
-            .with_initial_active_orders(initial_orders)
             .with_telemetry_channel(grid_telem_tx);
 
         // 5. Create Sniper Runner
