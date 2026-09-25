@@ -88,12 +88,11 @@ class TradeSyncService:
 
     async def backfill_realized_pnl(self):
         """
-        Scans existing SELL records in the DB with 0.0 PnL and matches them
-        against their corresponding grid rung BUYs to backfill accurate realized PnL.
+        Scans all trades chronologically and computes exact FIFO realized PnL.
+        Never clamps losses to positive numbers, ensuring 100% accounting fidelity.
         """
         try:
             async with LiveSessionLocal() as session:
-                # Query all trades ordered chronologically
                 res = await session.execute(
                     select(TradeRecord).order_by(TradeRecord.execution_time.asc())
                 )
@@ -101,46 +100,49 @@ class TradeSyncService:
                 if not all_trades:
                     return
 
-                buys_by_sym = {}
+                open_lots_by_sym = {}
                 updated_count = 0
 
                 for t in all_trades:
                     sym = t.symbol
+                    fx = t.fx_rate_to_gbp or 1.0
+                    fee = t.fee_gbp or 0.0
+
                     if t.side == "BUY":
-                        if sym not in buys_by_sym:
-                            buys_by_sym[sym] = []
-                        buys_by_sym[sym].append({"price": t.price, "qty": t.qty, "remaining": t.qty})
+                        if sym not in open_lots_by_sym:
+                            open_lots_by_sym[sym] = []
+                        open_lots_by_sym[sym].append({"price": t.price, "qty": t.qty, "remaining": t.qty})
                     elif t.side == "SELL":
-                        if t.realized_pnl_gbp is not None and t.realized_pnl_gbp > 0.0:
-                            continue
+                        needed = t.qty
+                        matched_cost = 0.0
+                        total_matched_qty = 0.0
 
-                        matched_buy = None
-                        if sym in buys_by_sym:
-                            for b in reversed(buys_by_sym[sym]):
-                                if abs(b["qty"] - t.qty) < 1e-7 and b["remaining"] > 1e-7:
-                                    matched_buy = b
-                                    break
-                            if not matched_buy:
-                                for b in reversed(buys_by_sym[sym]):
-                                    if b["remaining"] > 1e-7:
-                                        matched_buy = b
-                                        break
+                        if sym in open_lots_by_sym:
+                            lots = open_lots_by_sym[sym]
+                            while needed > 1e-7 and lots:
+                                lot = lots[0]
+                                take = min(needed, lot["remaining"])
+                                lot["remaining"] -= take
+                                needed -= take
+                                matched_cost += take * lot["price"]
+                                total_matched_qty += take
+                                if lot["remaining"] <= 1e-7:
+                                    lots.pop(0)
 
-                        fx = t.fx_rate_to_gbp or 1.0
-                        fee = t.fee_gbp or 0.0
-                        if matched_buy and matched_buy["price"] > 0:
-                            profit = ((t.price - matched_buy["price"]) * t.qty * fx) - fee
-                            matched_buy["remaining"] -= t.qty
+                        if total_matched_qty > 0.0:
+                            avg_buy = matched_cost / total_matched_qty
+                            profit = ((t.price - avg_buy) * t.qty * fx) - fee
                         else:
-                            step = 0.006 if "SOL" in sym else 0.004
-                            profit = (t.price * t.qty * step * fx) - fee
+                            profit = 0.0
 
-                        t.realized_pnl_gbp = round(max(0.0001, profit), 6)
-                        updated_count += 1
+                        pnl = round(profit, 6)
+                        if t.realized_pnl_gbp != pnl:
+                            t.realized_pnl_gbp = pnl
+                            updated_count += 1
 
                 if updated_count > 0:
                     await session.commit()
-                    logger.info(f"Backfilled realized PnL for {updated_count} historical SELL trades")
+                    logger.info(f"Backfilled accurate FIFO realized PnL for {updated_count} SELL trades")
         except Exception as e:
             logger.error(f"Error backfilling trade PnL: {e}")
 
@@ -199,28 +201,47 @@ class TradeSyncService:
                             # Realized PnL Calculation
                             realized_pnl_gbp = 0.0
                             if side == "SELL":
-                                # Match against the most recent BUY for this symbol
-                                stmt = (
+                                # Reconstruct open buys for this symbol using FIFO
+                                stmt_b = (
                                     select(TradeRecord)
                                     .where(TradeRecord.symbol == symbol, TradeRecord.side == "BUY")
-                                    .order_by(TradeRecord.execution_time.desc())
-                                    .limit(20)
+                                    .order_by(TradeRecord.execution_time.asc())
                                 )
-                                recent_buys_res = await session.execute(stmt)
-                                recent_buys = recent_buys_res.scalars().all()
-                                matched_buy = None
-                                for b in recent_buys:
-                                    if abs(b.qty - qty) < 1e-4:
-                                        matched_buy = b
-                                        break
-                                if not matched_buy and recent_buys:
-                                    matched_buy = recent_buys[0]
+                                all_buys = (await session.execute(stmt_b)).scalars().all()
+                                stmt_s = (
+                                    select(TradeRecord)
+                                    .where(TradeRecord.symbol == symbol, TradeRecord.side == "SELL")
+                                    .order_by(TradeRecord.execution_time.asc())
+                                )
+                                prev_sells = (await session.execute(stmt_s)).scalars().all()
 
-                                if matched_buy and matched_buy.price > 0:
-                                    profit = ((price - matched_buy.price) * qty * fx_rate) - fee_gbp
+                                open_buys = [{"price": b.price, "remaining": b.qty} for b in all_buys]
+                                for s in prev_sells:
+                                    s_needed = s.qty
+                                    while s_needed > 1e-7 and open_buys:
+                                        take = min(s_needed, open_buys[0]["remaining"])
+                                        open_buys[0]["remaining"] -= take
+                                        s_needed -= take
+                                        if open_buys[0]["remaining"] <= 1e-7:
+                                            open_buys.pop(0)
+
+                                needed = qty
+                                matched_cost = 0.0
+                                total_matched = 0.0
+                                while needed > 1e-7 and open_buys:
+                                    take = min(needed, open_buys[0]["remaining"])
+                                    open_buys[0]["remaining"] -= take
+                                    needed -= take
+                                    matched_cost += take * open_buys[0]["price"]
+                                    total_matched += take
+                                    if open_buys[0]["remaining"] <= 1e-7:
+                                        open_buys.pop(0)
+
+                                if total_matched > 0.0:
+                                    avg_buy = matched_cost / total_matched
+                                    profit = ((price - avg_buy) * qty * fx_rate) - fee_gbp
                                 else:
-                                    step = 0.0035 if "XRP" in symbol else (0.006 if "SOL" in symbol else 0.004)
-                                    profit = (price * qty * step * fx_rate) - fee_gbp
+                                    profit = 0.0
                                 realized_pnl_gbp = round(profit, 6)
                             
                             # Check if the fill belongs to a sniper or grid runner

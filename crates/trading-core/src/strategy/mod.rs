@@ -219,81 +219,114 @@ impl GeometricGridStrategy {
                 let per_rung = (total_inv_val / rungs_dec).round_dp(2);
                 let sell_clip = per_rung.min(self.config.order_size_gbp).max(min_clip);
 
-                // Strict No-Loss Floor: Ensure sell price is at or above cost basis (+0.15% minimum profit margin)
                 let min_profit_multiplier = dec!(1.0015);
-                let floor_price = self.config.cost_basis.map(|cb| round_price_for(cb * min_profit_multiplier));
                 let min_profit_floor_fiat = dec!(0.01);
+                let dust = dec!(0.000001);
+
+                let active_sell_cids: std::collections::HashSet<String> = self
+                    .active_orders
+                    .values()
+                    .filter(|o| o.side == OrderSide::Sell)
+                    .map(|o| o.client_order_id.clone())
+                    .collect();
+
+                let mut unassigned_lots: Vec<(usize, Decimal)> = self
+                    .lots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| !l.is_closed && l.counter_sell_client_order_id.as_ref().map_or(true, |cid| !active_sell_cids.contains(cid)))
+                    .map(|(idx, l)| (idx, l.qty))
+                    .collect();
 
                 for rung_idx in 1..=self.config.rungs_per_side {
                     let geo_factor = one + self.dynamic_pricing.config.geometric_spacing_ratio * Decimal::from(rung_idx - 1);
                     let step_at_rung = dynamic_step * geo_factor;
                     current_sell_multiplier *= one + step_at_rung;
-                    let mut rung_price = round_price_for(effective_center * current_sell_multiplier);
 
-                    if let Some(floor) = floor_price {
-                        if rung_price < floor {
-                            rung_price = floor;
-                        }
-                    }
-
-                    if rung_price <= Decimal::ZERO {
-                        continue;
-                    }
-
-                    let qty_dp = if self.config.symbol.base == "XRP" { 5 } else { 6 };
-                    let desired_qty = (sell_clip / rung_price).round_dp(qty_dp);
                     let remaining_base = base_avail - allocated_sell_base;
                     if remaining_base <= Decimal::ZERO {
                         break;
                     }
 
+                    let qty_dp = if self.config.symbol.base == "XRP" { 5 } else { 6 };
+                    let desired_qty = (sell_clip / effective_center).round_dp(qty_dp);
                     let qty = desired_qty.min(remaining_base);
                     if qty <= Decimal::ZERO {
                         break;
                     }
 
-                    // Guarantee each sell rung yields at least £0.01 gross profit above cost basis (if set) or effective center
-                    let reference_price = self.config.cost_basis.unwrap_or(effective_center);
-                    let (scale_factor, min_tick) = price_scale_and_tick(reference_price);
-                    let raw_delta = min_profit_floor_fiat / qty;
-                    let required_delta = (raw_delta * scale_factor).ceil() / scale_factor;
-                    let penny_floor = reference_price + required_delta.max(min_tick);
-                    if rung_price < penny_floor {
-                        rung_price = penny_floor;
+                    // Check minimum order size on Revolut X (>= 1.00 in quote currency)
+                    let (final_qty, is_sweep) = if (qty * effective_center).round_dp(2) < min_clip {
+                        if (remaining_base * effective_center).round_dp(2) >= min_clip {
+                            (remaining_base, true)
+                        } else {
+                            break;
+                        }
+                    } else {
+                        (qty, false)
+                    };
+
+                    // Allocate open lots to this sell rung and compute strict cost floor
+                    let mut allocated_lots_for_order = Vec::new();
+                    let mut max_lot_buy_price = None;
+                    let mut needed_lot_qty = final_qty;
+
+                    for (lot_idx, remaining_in_lot) in unassigned_lots.iter_mut() {
+                        if needed_lot_qty <= dust {
+                            break;
+                        }
+                        if *remaining_in_lot > dust {
+                            let take = needed_lot_qty.min(*remaining_in_lot);
+                            allocated_lots_for_order.push(*lot_idx);
+                            let lot_buy_price = self.lots[*lot_idx].buy_price;
+                            max_lot_buy_price = Some(max_lot_buy_price.map_or(lot_buy_price, |p: Decimal| p.max(lot_buy_price)));
+                            *remaining_in_lot -= take;
+                            needed_lot_qty -= take;
+                        }
                     }
 
-                    // Check minimum order size on Revolut X (>= 1.00 in quote currency)
-                    if (qty * rung_price).round_dp(2) < min_clip {
-                        if (remaining_base * rung_price).round_dp(2) >= min_clip {
-                            let sweep_qty = remaining_base;
-                            allocated_sell_base += sweep_qty;
-                            let sweep_raw_delta = min_profit_floor_fiat / sweep_qty;
-                            let sweep_required_delta = (sweep_raw_delta * scale_factor).ceil() / scale_factor;
-                            let sweep_penny_floor = reference_price + sweep_required_delta.max(min_tick);
-                            let sweep_price = rung_price.max(sweep_penny_floor);
+                    // Strict Zero-Loss Floor: Ensure sell price >= max_lot_buy_price (or cost_basis) * (1 + 0.15%) + Penny Shield
+                    let reference_price = max_lot_buy_price
+                        .or(self.config.cost_basis)
+                        .unwrap_or(effective_center);
+                    let floor_price = round_price_for(reference_price * min_profit_multiplier);
 
-                            let order = Order::new_limit_post_only(
-                                &self.config.runner_id,
-                                self.config.symbol.clone(),
-                                OrderSide::Sell,
-                                sweep_price,
-                                sweep_qty,
-                            );
-                            new_orders.push(order);
-                        }
+                    let (scale_factor, min_tick) = price_scale_and_tick(reference_price);
+                    let raw_delta = min_profit_floor_fiat / final_qty;
+                    let required_delta = (raw_delta * scale_factor).ceil() / scale_factor;
+                    let penny_floor = reference_price + required_delta.max(min_tick);
+
+                    let min_viable_sell_price = floor_price.max(penny_floor);
+                    let base_ref = effective_center.max(reference_price);
+                    let grid_target_price = round_price_for(base_ref * current_sell_multiplier);
+                    let rung_price = grid_target_price.max(min_viable_sell_price);
+
+                    if rung_price <= Decimal::ZERO {
                         break;
                     }
 
-                    allocated_sell_base += qty;
+                    allocated_sell_base += final_qty;
 
                     let order = Order::new_limit_post_only(
                         &self.config.runner_id,
                         self.config.symbol.clone(),
                         OrderSide::Sell,
                         rung_price,
-                        qty,
+                        final_qty,
                     );
+
+                    // Assign this order ID to all allocated lots
+                    for &idx in &allocated_lots_for_order {
+                        self.lots[idx].counter_sell_order_id = Some(order.id);
+                        self.lots[idx].counter_sell_client_order_id = Some(order.client_order_id.clone());
+                        self.lots[idx].target_sell_price = rung_price;
+                    }
+
                     new_orders.push(order);
+
+                    if is_sweep {
+                        break;
+                    }
                 }
             }
         }
@@ -369,34 +402,70 @@ impl GeometricGridStrategy {
             OrderSide::Sell => {
                 self.inventory_base -= fill.qty;
 
-                // Match against open lot (first by counter_sell_client_order_id, fallback to FIFO)
-                let mut matched_buy_price = None;
+                let mut remaining_fill_qty = fill.qty;
+                let mut total_cost = Decimal::ZERO;
+                let mut total_matched_qty = Decimal::ZERO;
+                let dust = dec!(0.000001);
+
+                // 1. First, match lots registered to this specific counter_sell_client_order_id
                 for lot in self.lots.iter_mut() {
-                    if !lot.is_closed {
-                        let matches_cid = lot.counter_sell_client_order_id.as_deref() == Some(&fill.client_order_id);
-                        if matches_cid || matched_buy_price.is_none() {
+                    if !lot.is_closed && lot.counter_sell_client_order_id.as_deref() == Some(&fill.client_order_id) {
+                        let take = remaining_fill_qty.min(lot.qty);
+                        total_cost += take * lot.buy_price;
+                        total_matched_qty += take;
+                        lot.qty -= take;
+                        remaining_fill_qty -= take;
+                        if lot.qty <= dust {
                             lot.is_closed = true;
-                            matched_buy_price = Some(lot.buy_price);
-                            if matches_cid {
+                        }
+                        if remaining_fill_qty <= dust {
+                            break;
+                        }
+                    }
+                }
+
+                // 2. If remaining fill qty > 0 (e.g. order covered multiple lots or was unmatched), match oldest open lots (FIFO)
+                if remaining_fill_qty > dust {
+                    for lot in self.lots.iter_mut() {
+                        if !lot.is_closed {
+                            let take = remaining_fill_qty.min(lot.qty);
+                            total_cost += take * lot.buy_price;
+                            total_matched_qty += take;
+                            lot.qty -= take;
+                            remaining_fill_qty -= take;
+                            if lot.qty <= dust {
+                                lot.is_closed = true;
+                            }
+                            if remaining_fill_qty <= dust {
                                 break;
                             }
                         }
                     }
                 }
 
-                // If no lot was matched (e.g. from pre-existing inventory), use cost_basis if present, or implied entry
-                let buy_price = matched_buy_price
-                    .or(self.config.cost_basis)
-                    .unwrap_or(fill.price / (one + dynamic_step));
+                // 3. If any fill qty was unallocated to open lots (e.g. pre-existing inventory), use cost_basis or max open lot or fill.price
+                if remaining_fill_qty > dust {
+                    let fallback_cost = self.config.cost_basis
+                        .or_else(|| self.lots.iter().filter(|l| !l.is_closed).map(|l| l.buy_price).max())
+                        .unwrap_or(fill.price);
+                    total_cost += remaining_fill_qty * fallback_cost;
+                    total_matched_qty += remaining_fill_qty;
+                }
 
-                let profit = (fill.price - buy_price) * fill.qty - fill.fee;
+                let effective_buy_price = if total_matched_qty > Decimal::ZERO {
+                    total_cost / total_matched_qty
+                } else {
+                    fill.price
+                };
+
+                let profit = (fill.price - effective_buy_price) * fill.qty - fill.fee;
                 self.realized_pnl += profit;
 
                 info!(
-                    "[{}] Grid SELL filled @ £{} (matched buy @ £{}, qty: {}) -> True Realized Profit: £{:.4} (Total PnL: £{:.4})",
+                    "[{}] Grid SELL filled @ £{} (effective buy @ £{:.4}, qty: {}) -> True Realized Profit: £{:.4} (Total PnL: £{:.4})",
                     self.config.runner_id,
                     fill.price,
-                    buy_price,
+                    effective_buy_price,
                     fill.qty,
                     profit,
                     self.realized_pnl

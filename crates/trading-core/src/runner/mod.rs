@@ -137,6 +137,65 @@ impl GridRunner {
         info!("[{}] Grid Runner task started for {}", self.runner_id, self.symbol);
         self.publish_telemetry();
 
+        // Recover open lots from persistent trade history if DB is available
+        if let Some(ref db) = self.db {
+            if let Ok(lots) = db.reconstruct_open_lots(&self.symbol.as_slash()).await {
+                if !lots.is_empty() {
+                    let total_qty: Decimal = lots.iter().map(|l| l.qty).sum();
+                    let total_cost: Decimal = lots.iter().map(|l| l.qty * l.buy_price).sum();
+                    let avg_cost = total_cost / total_qty;
+                    let max_buy = lots.iter().map(|l| l.buy_price).max().unwrap_or(avg_cost);
+                    info!(
+                        "[LOT-RECOVERY] [{}] Recovered {} open inventory lots from DB for {}: total qty {} @ avg cost £{:.4} (max buy £{:.4})",
+                        self.runner_id,
+                        lots.len(),
+                        self.symbol.as_slash(),
+                        total_qty,
+                        avg_cost,
+                        max_buy
+                    );
+                    self.strategy.lots = lots;
+                    self.strategy.config.cost_basis = Some(avg_cost);
+                }
+            }
+        }
+
+        // Reconcile and adopt any pre-existing resting orders on venue for this symbol
+        if self.simulator.is_none() {
+            if let Ok(active) = self.execution_client.get_active_orders().await {
+                let mut adopted_buys = 0;
+                let mut adopted_sells = 0;
+                for ord in active {
+                    if ord.symbol == self.symbol {
+                        if ord.side == OrderSide::Sell {
+                            adopted_sells += 1;
+                            // Match to an unassigned lot
+                            for lot in self.strategy.lots.iter_mut() {
+                                if !lot.is_closed && lot.counter_sell_client_order_id.is_none() {
+                                    lot.counter_sell_order_id = Some(ord.id);
+                                    lot.counter_sell_client_order_id = Some(ord.client_order_id.clone());
+                                    lot.target_sell_price = ord.price;
+                                    break;
+                                }
+                            }
+                        } else {
+                            adopted_buys += 1;
+                        }
+                        self.strategy.register_active_order(ord);
+                    }
+                }
+                if adopted_buys > 0 || adopted_sells > 0 {
+                    info!(
+                        "[ORDER-ADOPTION] [{}] Adopted {} resting venue orders on startup ({} BUYs, {} SELLs)",
+                        self.runner_id,
+                        adopted_buys + adopted_sells,
+                        adopted_buys,
+                        adopted_sells
+                    );
+                }
+            }
+        }
+
         let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(2));
 
         loop {
@@ -208,7 +267,13 @@ impl GridRunner {
                                     if let Some(ref db) = self.db {
                                         db.update_order_status(&fill.client_order_id, "FILLED").await;
                                     }
-                                    if let Some(counter_order) = self.strategy.on_fill(&fill) {
+                                    let prev_pnl = self.strategy.realized_pnl;
+                                    let maybe_counter_order = self.strategy.on_fill(&fill);
+                                    if let Some(ref db) = self.db {
+                                        let trade_pnl = self.strategy.realized_pnl - prev_pnl;
+                                        db.save_trade_fill(&fill, trade_pnl).await;
+                                    }
+                                    if let Some(counter_order) = maybe_counter_order {
                                         info!(
                                             "[COUNTER-ORDER] [{}] Generated counter order {} for fill {}: {} {} @ £{}",
                                             self.runner_id, counter_order.client_order_id, fill.client_order_id, counter_order.side, counter_order.qty, counter_order.price

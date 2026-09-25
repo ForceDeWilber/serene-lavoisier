@@ -45,6 +45,32 @@ impl DbStore {
                 [],
             )?;
 
+            // Initialize trade_records table matching Python's SQLAlchemy schema
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS trade_records (
+                    id TEXT PRIMARY KEY,
+                    client_order_id TEXT,
+                    symbol TEXT,
+                    side TEXT,
+                    price REAL,
+                    qty REAL,
+                    value_asset REAL,
+                    fee_asset REAL,
+                    fx_rate_to_gbp REAL,
+                    value_gbp REAL,
+                    fee_gbp REAL,
+                    realized_pnl_gbp REAL,
+                    strategy_type TEXT,
+                    execution_time DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_trade_records_symbol_exec ON trade_records (symbol, execution_time)",
+                [],
+            )?;
+
             // Initialize pair_configurations table
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS pair_configurations (
@@ -148,6 +174,130 @@ impl DbStore {
         );
         if let Err(e) = res {
             error!("Failed to update order {} status to DB: {}", cid, e);
+        }
+    }
+
+    /// Reconstructs open inventory lots from historical trade records using strict FIFO matching.
+    pub async fn reconstruct_open_lots(&self, symbol_slash: &str) -> anyhow::Result<Vec<crate::strategy::InventoryLot>> {
+        let conn = self.conn.clone();
+        let sym = symbol_slash.to_string();
+        let c = conn.lock().await;
+
+        let table_exists: i64 = c.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='trade_records'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0);
+
+        if table_exists == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt = c.prepare(
+            "SELECT id, client_order_id, side, price, qty
+             FROM trade_records
+             WHERE symbol = ?1
+             ORDER BY execution_time ASC, created_at ASC"
+        )?;
+
+        let rows = stmt.query_map(params![sym], |row| {
+            let id: String = row.get(0)?;
+            let cid: Option<String> = row.get(1)?;
+            let side: String = row.get(2)?;
+            let price: f64 = row.get(3)?;
+            let qty: f64 = row.get(4)?;
+            Ok((id, cid.unwrap_or_default(), side, price, qty))
+        })?;
+
+        let mut open_lots: Vec<crate::strategy::InventoryLot> = Vec::new();
+        let min_profit_margin = Decimal::from_str("0.0015").unwrap_or_default();
+        let dust = Decimal::from_str("0.000001").unwrap_or_default();
+
+        for r in rows {
+            let (id_str, cid, side, price_f, qty_f) = r?;
+            let price = Decimal::from_str(&format!("{:.8}", price_f)).unwrap_or_default();
+            let qty = Decimal::from_str(&format!("{:.8}", qty_f)).unwrap_or_default();
+
+            if price <= Decimal::ZERO || qty <= Decimal::ZERO {
+                continue;
+            }
+
+            if side.eq_ignore_ascii_case("BUY") {
+                let target_price = crate::strategy::round_price_for(price * (Decimal::ONE + min_profit_margin));
+                let buy_order_uuid = uuid::Uuid::parse_str(&id_str).unwrap_or_else(|_| uuid::Uuid::new_v4());
+                open_lots.push(crate::strategy::InventoryLot {
+                    lot_id: uuid::Uuid::new_v4(),
+                    buy_order_id: buy_order_uuid,
+                    buy_client_order_id: cid,
+                    buy_price: price,
+                    qty,
+                    counter_sell_order_id: None,
+                    counter_sell_client_order_id: None,
+                    target_sell_price: target_price,
+                    is_closed: false,
+                });
+            } else if side.eq_ignore_ascii_case("SELL") {
+                let mut needed = qty;
+                for lot in open_lots.iter_mut() {
+                    if !lot.is_closed {
+                        let take = needed.min(lot.qty);
+                        lot.qty -= take;
+                        needed -= take;
+                        if lot.qty <= dust {
+                            lot.is_closed = true;
+                        }
+                        if needed <= dust {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        open_lots.retain(|l| !l.is_closed && l.qty > dust);
+        info!(
+            "[DB-LOT-RECOVERY] Reconstructed {} open lots for {} from trade_records (total qty: {})",
+            open_lots.len(),
+            sym,
+            open_lots.iter().map(|l| l.qty).sum::<Decimal>()
+        );
+        Ok(open_lots)
+    }
+
+    /// Saves a trade fill record directly into SQLite trade_records table with exact realized PnL.
+    pub async fn save_trade_fill(&self, fill: &crate::model::Fill, pnl: Decimal) {
+        let conn = self.conn.clone();
+        let fill_id = fill.order_id.to_string();
+        let cid = fill.client_order_id.clone();
+        let symbol = fill.symbol.as_slash();
+        let side = fill.side.to_string();
+        let price = fill.price.to_string().parse::<f64>().unwrap_or(0.0);
+        let qty = fill.qty.to_string().parse::<f64>().unwrap_or(0.0);
+        let val_asset = price * qty;
+        let fee_asset = fill.fee.to_string().parse::<f64>().unwrap_or(0.0);
+        let fx_rate = 1.0;
+        let val_gbp = val_asset * fx_rate;
+        let fee_gbp = fee_asset * fx_rate;
+        let pnl_gbp = pnl.to_string().parse::<f64>().unwrap_or(0.0);
+        let strat_type = "Maker Grid".to_string();
+        let exec_time = fill.timestamp.to_rfc3339();
+
+        let c = conn.lock().await;
+        let res = c.execute(
+            "INSERT INTO trade_records (
+                id, client_order_id, symbol, side, price, qty,
+                value_asset, fee_asset, fx_rate_to_gbp, value_gbp, fee_gbp,
+                realized_pnl_gbp, strategy_type, execution_time
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            ON CONFLICT(id) DO UPDATE SET realized_pnl_gbp=excluded.realized_pnl_gbp",
+            params![
+                fill_id, cid, symbol, side, price, qty,
+                val_asset, fee_asset, fx_rate, val_gbp, fee_gbp,
+                pnl_gbp, strat_type, exec_time
+            ],
+        );
+        if let Err(e) = res {
+            error!("Failed to save trade fill {} to DB: {}", cid, e);
         }
     }
 

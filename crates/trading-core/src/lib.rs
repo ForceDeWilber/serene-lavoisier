@@ -698,6 +698,110 @@ mod tests {
             total_span_pct * dec!(100.0)
         );
     }
+
+    #[test]
+    fn test_unassigned_open_lots_strictly_guarded_in_initialize_grid() {
+        let config = GridConfig {
+            runner_id: "test_unassigned_lot_runner".into(),
+            symbol: Symbol::xrp_gbp(),
+            step_pct: dec!(0.0035),
+            rungs_per_side: 5,
+            order_size_gbp: dec!(15.0),
+            rebalance_threshold_pct: dec!(0.012),
+            dynamic_pricing: DynamicPricingConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            mode: None,
+            cost_basis: None,
+        };
+        let mut strategy = GeometricGridStrategy::new(config);
+
+        // Pre-existing unassigned lot recovered from DB (e.g. after restart):
+        // 10 XRP bought at £1.1800
+        strategy.lots.push(InventoryLot {
+            lot_id: Uuid::new_v4(),
+            buy_order_id: Uuid::new_v4(),
+            buy_client_order_id: "prev_buy_1".into(),
+            buy_price: dec!(1.1800),
+            qty: dec!(10.0),
+            counter_sell_order_id: None,
+            counter_sell_client_order_id: None,
+            target_sell_price: dec!(1.1850),
+            is_closed: false,
+        });
+
+        // Market price dumps to £1.1200 (-5.1% from £1.1800)
+        // strategy.active_orders is EMPTY!
+        let orders = strategy.initialize_grid(dec!(1.1200), Some(dec!(50.0)), Some(dec!(10.0)));
+        let sells: Vec<&Order> = orders.iter().filter(|o| o.side == OrderSide::Sell).collect();
+
+        assert!(!sells.is_empty(), "Should generate sell order to liquidate inventory");
+        for sell in sells {
+            assert!(
+                sell.price >= dec!(1.1818),
+                "Sell order price £{} was lower than entry price £1.1800 + profit floor (£1.1818)!",
+                sell.price
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_db_reconstruct_open_lots_exact_fifo() {
+        let db_path = format!("/tmp/test_db_{}.db", Uuid::new_v4());
+        let db = db::DbStore::new(&db_path).await.unwrap();
+
+        // Simulate 2 BUYs and 1 partial SELL
+        let fill_b1 = Fill {
+            runner_id: "test".into(),
+            order_id: Uuid::new_v4(),
+            client_order_id: "b1".into(),
+            symbol: Symbol::xrp_gbp(),
+            side: OrderSide::Buy,
+            price: dec!(1.1500),
+            qty: dec!(10.0),
+            fee: Decimal::ZERO,
+            timestamp: Utc::now() - chrono::Duration::hours(2),
+        };
+        let fill_b2 = Fill {
+            runner_id: "test".into(),
+            order_id: Uuid::new_v4(),
+            client_order_id: "b2".into(),
+            symbol: Symbol::xrp_gbp(),
+            side: OrderSide::Buy,
+            price: dec!(1.1800),
+            qty: dec!(10.0),
+            fee: Decimal::ZERO,
+            timestamp: Utc::now() - chrono::Duration::hours(1),
+        };
+        let fill_s1 = Fill {
+            runner_id: "test".into(),
+            order_id: Uuid::new_v4(),
+            client_order_id: "s1".into(),
+            symbol: Symbol::xrp_gbp(),
+            side: OrderSide::Sell,
+            price: dec!(1.1600),
+            qty: dec!(5.0),
+            fee: Decimal::ZERO,
+            timestamp: Utc::now(),
+        };
+
+        db.save_trade_fill(&fill_b1, Decimal::ZERO).await;
+        db.save_trade_fill(&fill_b2, Decimal::ZERO).await;
+        db.save_trade_fill(&fill_s1, dec!(0.05)).await;
+
+        let open_lots = db.reconstruct_open_lots("XRP/GBP").await.unwrap();
+        assert_eq!(open_lots.len(), 2, "Should have 2 open lots");
+        assert_eq!(open_lots[0].qty, dec!(5.0), "First lot should have 5.0 remaining");
+        assert_eq!(open_lots[0].buy_price, dec!(1.1500));
+        assert_eq!(open_lots[1].qty, dec!(10.0), "Second lot should have 10.0 remaining");
+        assert_eq!(open_lots[1].buy_price, dec!(1.1800));
+
+        let total_qty: Decimal = open_lots.iter().map(|l| l.qty).sum();
+        assert_eq!(total_qty, dec!(15.0));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
 }
 
 
